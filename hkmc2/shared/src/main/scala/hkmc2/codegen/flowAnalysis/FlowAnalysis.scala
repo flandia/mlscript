@@ -331,8 +331,6 @@ class ProdStratScheme(
   val s: StratVar,
   val accessEffect: StratVar | NoProd,
   val constraints: Ls[ProdStrat -> ConsStrat],
-  // Access effects of definitions in this scheme, copied with its constraints for logging.
-  val accessEffectsForLogging: Map[(TermSymbol, Opt[InstantiationId]), StratVar],
 )
 
 class FlowPreAnalyzer(val pgrm: Program)(using
@@ -740,7 +738,7 @@ class FlowConstraintsCollector(
     val forFunGroup: Opt[TermSymbol],
     val forFun: Opt[TermSymbol],
     buffer: mutable.ListBuffer[ProdStrat -> ConsStrat],
-    val accessEffectsForLogging: LinkedHashMap[(TermSymbol, Opt[InstantiationId]), StratVar],
+    val accessEffects: LinkedHashMap[(TermSymbol, Opt[InstantiationId]), StratVar],
   ):
     def constraints: Ls[ProdStrat -> ConsStrat] = buffer.toList
     val instId: Opt[InstantiationId] = forFunGroup.fold(S(Nil))(_ => N)
@@ -748,14 +746,14 @@ class FlowConstraintsCollector(
     def constrain(cs: Iterable[ProdStrat -> ConsStrat]) = buffer.prependAll(cs)
     def forActualRootFun(fun: TermSymbol): ConstraintsCollector =
       assert(preAnalyzer.res.rootFunDefns.contains(fun))
-      new ConstraintsCollector(forFunGroup, S(fun), buffer, accessEffectsForLogging)
+      new ConstraintsCollector(forFunGroup, S(fun), buffer, accessEffects)
   private object ConstraintsCollector:
     def apply(forFunGroup: Opt[TermSymbol], forFun: Opt[TermSymbol]): ConstraintsCollector =
       new ConstraintsCollector(forFunGroup, forFun, mutable.ListBuffer.empty, LinkedHashMap.empty)
   
   private val globalCollector = ConstraintsCollector(N, N)
   def allConstraints = globalCollector.constraints
-  def accessEffectsForLogging: collection.Map[(TermSymbol, Opt[InstantiationId]), StratVar] = globalCollector.accessEffectsForLogging
+  def accessEffects: collection.Map[(TermSymbol, Opt[InstantiationId]), StratVar] = globalCollector.accessEffects
   val funToSccGroups = MutMap.empty[TermSymbol, Ls[TermSymbol]]
   def funToSccRep(tSym: TermSymbol): Option[TermSymbol] = funToSccGroups.get(tSym).map(_.head)
   
@@ -779,6 +777,8 @@ class FlowConstraintsCollector(
   
   locally {
     val funsToProdStratScheme = MutMap.empty[TermSymbol, ProdStratScheme]
+    // Access effects of definitions in each SCC, copied with its constraints for logging.
+    val sccAccessEffects = MutMap.empty[TermSymbol, Map[(TermSymbol, Opt[InstantiationId]), StratVar]]
 
     if !mono then
       // Computing the ProdStratScheme for each scc group, this way the sccs of the call graph is
@@ -809,9 +809,10 @@ class FlowConstraintsCollector(
                 stratVar <- preAnalyzer.res.generatedVars.get(sym)
                 if stratVar.generatedForFun.flatMap(funToSccRep).contains(groupRep)
               do cc.constrain(stratVar, NonAffine)
+            sccAccessEffects(groupRep) = cc.accessEffects.toMap
             for funSym <- groupedFuns do
               funsToProdStratScheme(funSym) = ProdStratScheme(
-                generatedVars(funSym), generatedEffects.getOrElse(funSym, NoProd), cc.constraints, cc.accessEffectsForLogging.toMap)
+                generatedVars(funSym), generatedEffects.getOrElse(funSym, NoProd), cc.constraints)
       end ProdStratSchemeAnalysisInScc
       
       ProdStratSchemeAnalysisInScc.queryAll(preAnalyzer.res.rootFunDefns.keys)
@@ -914,9 +915,9 @@ class FlowConstraintsCollector(
       val accessEffect = duplicateVarStateOpt(pScheme.accessEffect)
       pScheme.constraints.foreach: (p, c) =>
         cc.constrain(duplicateProdStrat(p), duplicateConsStrat(c))
-      pScheme.accessEffectsForLogging.foreach:
+      sccAccessEffects(groupRep).foreach:
         case ((symbol, instId), effect) =>
-          cc.accessEffectsForLogging((symbol, updateInstantiationId(instId))) = duplicateVarState(effect)
+          cc.accessEffects((symbol, updateInstantiationId(instId))) = duplicateVarState(effect)
       (newProd, accessEffect)
     
     extension (v: StratVar)
@@ -981,7 +982,7 @@ class FlowConstraintsCollector(
       fun.params match
       case Nil =>
         val effect = generatedEffects(fun.dSym)
-        cc.accessEffectsForLogging((fun.dSym, cc.instId)) = effect
+        cc.accessEffects((fun.dSym, cc.instId)) = effect
         processBlock(fun.body)(using cc, generatedVars(fun.dSym),
           if fun.annotations.exists(_.isInstanceOf[Annot.Pure]) then N else S(effect))
       case nel: NELs[?] =>
@@ -1338,7 +1339,7 @@ class FlowConstraintSolver(val collector: FlowConstraintsCollector):
       tl.log("<<< accumulator syms <<<")
   
   locally {
-    for ((symbol, instId), effect) <- collector.accessEffectsForLogging do
+    for ((symbol, instId), effect) <- collector.accessEffects do
       accessEffectVars(ConcreteId(symbol, instId.getOrElse(lastWords("uninstantiated access effect")))) = effect
     def hasConcreteInstantiationId(prodOrCons: ProdStrat | ConsStrat): Boolean = prodOrCons match
       case s: StratWithOrigin[?] => s.instantiationId.isDefined
