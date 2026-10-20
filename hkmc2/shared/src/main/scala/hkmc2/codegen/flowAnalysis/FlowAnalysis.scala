@@ -133,7 +133,7 @@ type CtorCls = ClassLikeSymbol | Int
 type SelField = TermSymbol | Int
 type FunId = (funSym: TermSymbol, whichParamList: Int) | ResultId
 type CallId = (exprId: ResultId, whichArgList: Int)
-type OriginId = ResultId | FunId | CallId
+type OriginId = ResultId | FunId | CallId | TermSymbol
 type ConcreteFunId = ConcreteId[FunId]
 
 
@@ -321,12 +321,17 @@ class Dtor(
 
 case class ConcreteId[A <: OriginId](exprId: A, instId: InstantiationId):
   def pp(using FlowAnalysis.State): Str = exprId match
+    case sym: TermSymbol => sym.nme
     case (sym: TermSymbol, idx: Int) => s"${sym.nme}#$idx"
     case (r: ResultId, idx: Int) => s"${r.getResult}#$idx"
     case r: ResultId => s"${r.getResult}"
 
 
-class ProdStratScheme(val s: StratVar, val constraints: Ls[ProdStrat -> ConsStrat])
+class ProdStratScheme(
+  val s: StratVar,
+  val accessEffect: StratVar | NoProd,
+  val constraints: Ls[ProdStrat -> ConsStrat],
+)
 
 class FlowPreAnalyzer(val pgrm: Program)(using
   val tl: TraceLogger,
@@ -365,8 +370,8 @@ class FlowPreAnalyzer(val pgrm: Program)(using
     val selToCtxOfSel = MutMap.empty[ResultId, Ls[InCtx]]
     val modSymToBms = MutMap.empty[Symbol, BlockMemberSymbol]
     val generatedVars = MutMap.empty[Symbol, StratVar] // TODO: tighten `Symbol` type!
-    val generatedEffects = MutMap.empty[Symbol, StratVar] // TODO: tighten `Symbol` type! // TODO: populate for getters!
-    val capturedVars = MutMap.empty[FunId, LinkedHashSet[Symbol]]
+    val generatedEffects = MutMap.empty[Symbol, StratVar] // TODO: tighten `Symbol` type!
+    val capturedVars = MutMap.empty[FunId | TermSymbol, LinkedHashSet[Symbol]]
     val affinityCounts = MutMap.empty[Symbol, Int].withDefaultValue(0)
     def getEnclosingMatchesForSel(selExprId: ResultId) =
       selToCtxOfSel.get(selExprId).fold(Iterator.empty):
@@ -440,7 +445,12 @@ class FlowPreAnalyzer(val pgrm: Program)(using
           locallyDefined += fun.dSym
           withCaptureInfo((fun.dSym, whichParamList), locallyDefined):
             withParamListCaptureInfo(paramLists)
-      withCtx(InCtx.Fn(fun))(withParamListCaptureInfo(fun.params.iterator.zipWithIndex)):
+      withCtx(InCtx.Fn(fun))(
+        if fun.params.isEmpty then
+          withCaptureInfo(fun.dSym, MutSet[Symbol](fun.sym, fun.dSym))(body)
+        else
+          withParamListCaptureInfo(fun.params.iterator.zipWithIndex)
+      ):
         res.funSymToFunDefn(fun.dSym) = fun
         if isTopLvlLikeFunCtx(ctx) then
           res.rootFunDefns.addOne(fun.dSym -> fun)
@@ -508,7 +518,7 @@ class FlowPreAnalyzer(val pgrm: Program)(using
       if !capInfo.locallyDefined.contains(l) then
         capInfo.captured += l
 
-  private def withCaptureInfo(owner: FunId, locallyDefined: MutSet[Symbol])(body: => Any): Unit =
+  private def withCaptureInfo(owner: FunId | TermSymbol, locallyDefined: MutSet[Symbol])(body: => Any): Unit =
     val outerCapInfo = currentCaptureInfo
     val newCapInfo = CaptureTrackingInfo(locallyDefined, LinkedHashSet.empty)
     currentCaptureInfo = S(newCapInfo)
@@ -652,6 +662,9 @@ class FlowPreAnalyzer(val pgrm: Program)(using
   override def applyFunDefn(fun: FunDefn): Unit =
     ctxTracker.inFun(fun):
       ctxTracker.registerStratVar(fun.dSym, fun.sym.nme)
+      if fun.params.isEmpty then
+        res.generatedEffects(fun.dSym) = freshVar(
+          s"access_effect_${fun.dSym.nme}", S(fun.dSym), res.generatedVars(fun.dSym).generatedForFun)
       currentCaptureInfo.foreach(_.locallyDefined += fun.dSym)
       fun.params.foreach(applyParamList)
       applyBlock(fun.body)
@@ -725,6 +738,7 @@ class FlowConstraintsCollector(
     val forFunGroup: Opt[TermSymbol],
     val forFun: Opt[TermSymbol],
     buffer: mutable.ListBuffer[ProdStrat -> ConsStrat],
+    val accessEffects: LinkedHashMap[(TermSymbol, Opt[InstantiationId]), StratVar],
   ):
     def constraints: Ls[ProdStrat -> ConsStrat] = buffer.toList
     val instId: Opt[InstantiationId] = forFunGroup.fold(S(Nil))(_ => N)
@@ -732,13 +746,14 @@ class FlowConstraintsCollector(
     def constrain(cs: Iterable[ProdStrat -> ConsStrat]) = buffer.prependAll(cs)
     def forActualRootFun(fun: TermSymbol): ConstraintsCollector =
       assert(preAnalyzer.res.rootFunDefns.contains(fun))
-      new ConstraintsCollector(forFunGroup, S(fun), buffer)
+      new ConstraintsCollector(forFunGroup, S(fun), buffer, accessEffects)
   private object ConstraintsCollector:
     def apply(forFunGroup: Opt[TermSymbol], forFun: Opt[TermSymbol]): ConstraintsCollector =
-      new ConstraintsCollector(forFunGroup, forFun, mutable.ListBuffer.empty)
+      new ConstraintsCollector(forFunGroup, forFun, mutable.ListBuffer.empty, LinkedHashMap.empty)
   
   private val globalCollector = ConstraintsCollector(N, N)
   def allConstraints = globalCollector.constraints
+  def accessEffects: collection.Map[(TermSymbol, Opt[InstantiationId]), StratVar] = globalCollector.accessEffects
   val funToSccGroups = MutMap.empty[TermSymbol, Ls[TermSymbol]]
   def funToSccRep(tSym: TermSymbol): Option[TermSymbol] = funToSccGroups.get(tSym).map(_.head)
   
@@ -752,8 +767,8 @@ class FlowConstraintsCollector(
   
   private val generatedVars: collection.Map[Symbol, StratVar] = // TODO: tighten `Symbol` type!
     preAnalyzer.res.generatedVars.withDefaultValue(preAnalyzer.res.primitiveStratVar)
-  private val generatedEffects: collection.Map[Symbol, StratVar] = // TODO: tighten `Symbol` type! // TODO: use at access sites of getters!
-    preAnalyzer.res.generatedEffects.withDefaultValue(preAnalyzer.res.primitiveStratVar)
+  private val generatedEffects: collection.Map[Symbol, StratVar] = // TODO: tighten `Symbol` type!
+    preAnalyzer.res.generatedEffects
 
   // * This is for effect analysis. The nonlocal variables that are potentially shared. 
   // * If a function accesses a nonlocal, it is conservatively considered unsafe for eta-expansion. 
@@ -762,6 +777,8 @@ class FlowConstraintsCollector(
   
   locally {
     val funsToProdStratScheme = MutMap.empty[TermSymbol, ProdStratScheme]
+    // Access effects of definitions in each SCC, copied with its constraints for logging.
+    val sccAccessEffects = MutMap.empty[TermSymbol, Map[(TermSymbol, Opt[InstantiationId]), StratVar]]
 
     if !mono then
       // Computing the ProdStratScheme for each scc group, this way the sccs of the call graph is
@@ -771,10 +788,11 @@ class FlowConstraintsCollector(
           var callees = Ls.empty[TermSymbol]
           object CollectAllReferredFun extends BlockTraverser:
             override def applyPath(p: Path) = p match
-              case FunRef(callee, _) =>
+              case FunRef(callee, selectedFrom) =>
                 if preAnalyzer.res.rootFunDefns.contains(callee) then
                   callees ::= callee
-              case _ => ()
+                selectedFrom.foreach(applyPath)
+              case _ => super.applyPath(p)
           CollectAllReferredFun.applyBlock(preAnalyzer.res.rootFunDefns(f).body)
           callees
         protected def isHandled(f: TermSymbol) = funsToProdStratScheme.contains(f)
@@ -791,8 +809,10 @@ class FlowConstraintsCollector(
                 stratVar <- preAnalyzer.res.generatedVars.get(sym)
                 if stratVar.generatedForFun.flatMap(funToSccRep).contains(groupRep)
               do cc.constrain(stratVar, NonAffine)
+            sccAccessEffects(groupRep) = cc.accessEffects.toMap
             for funSym <- groupedFuns do
-              funsToProdStratScheme(funSym) = ProdStratScheme(generatedVars(funSym), cc.constraints)
+              funsToProdStratScheme(funSym) = ProdStratScheme(
+                generatedVars(funSym), generatedEffects.getOrElse(funSym, NoProd), cc.constraints)
       end ProdStratSchemeAnalysisInScc
       
       ProdStratSchemeAnalysisInScc.queryAll(preAnalyzer.res.rootFunDefns.keys)
@@ -833,7 +853,7 @@ class FlowConstraintsCollector(
           val pScheme = funsToProdStratScheme(funSym)
           val synthesizedRefUid =
             preAnalyzer.res.funSymToFunDefn(funSym).sym.asMemberRef(funSym).uid
-          val selfProd = pScheme.instantiate(synthesizedRefUid, funSym)
+          val (selfProd, _) = pScheme.instantiate(synthesizedRefUid, funSym)
           cc.constrain(selfProd, UnknownCons)
           val selfInstId = synthesizedRefUid :: Nil
           synthesizedInstIdToFunSym(selfInstId) = funSym
@@ -843,7 +863,7 @@ class FlowConstraintsCollector(
     extension (pScheme: ProdStratScheme) def instantiate(
       referSite: ResultId,
       referringTo: TermSymbol
-    )(using cc: ConstraintsCollector): StratVar =
+    )(using cc: ConstraintsCollector): (StratVar, StratVar | NoProd) =
       val groupRep: TermSymbol = funToSccRep(referringTo).get
       val stratVarMap = MutMap.empty[StratVar, StratVar]
       def updateInstantiationId(instId: Opt[InstantiationId]) =
@@ -892,9 +912,13 @@ class FlowConstraintsCollector(
             duplicateVarState(fSel.consVar))
         case dtor: Dtor => new Dtor(dtor.exprId, updateInstantiationId(dtor.instantiationId))
       val newProd = duplicateVarState(pScheme.s)
+      val accessEffect = duplicateVarStateOpt(pScheme.accessEffect)
       pScheme.constraints.foreach: (p, c) =>
         cc.constrain(duplicateProdStrat(p), duplicateConsStrat(c))
-      newProd
+      sccAccessEffects(groupRep).foreach:
+        case ((symbol, instId), effect) =>
+          cc.accessEffects((symbol, updateInstantiationId(instId))) = duplicateVarState(effect)
+      (newProd, accessEffect)
     
     extension (v: StratVar)
       def constrainOpaque(using cc: ConstraintsCollector): Unit =
@@ -957,7 +981,10 @@ class FlowConstraintsCollector(
     def processFunctionBody(fun: FunDefn)(using cc: ConstraintsCollector): Unit =
       fun.params match
       case Nil =>
-        processBlock(fun.body)(using cc, generatedVars(fun.dSym), S(generatedEffects(fun.dSym)))
+        val effect = generatedEffects(fun.dSym)
+        cc.accessEffects((fun.dSym, cc.instId)) = effect
+        processBlock(fun.body)(using cc, generatedVars(fun.dSym),
+          if fun.annotations.exists(_.isInstanceOf[Annot.Pure]) then N else S(effect))
       case nel: NELs[?] =>
         val funProdStrat = mkFunProdStrat(
           s"${fun.dSym.nme}_res",
@@ -1152,16 +1179,19 @@ class FlowConstraintsCollector(
         case p: Path =>
           p match
           case refSite @ FunRef(f, selectedFrom) =>
-            // ? [todo:harry-0]
-            // ? It's a special case for module getters but I'm not sure if
-            // ? this is good enough. It just conservatively marks it unsafe.
-            if f.irFunDefn.fold(!f.isPure)(_.params.isEmpty) then markUnsafeEta()
             for qual <- selectedFrom do
               cc.constrain(processResult(qual), UnknownCons)
-            funsToProdStratScheme.get(f) match
-            case Some(fScheme) =>
-              fScheme.instantiate(refSite.uid, f)
-            case None => generatedVars(f)
+            val (stratVar, accessEffect) = funsToProdStratScheme.get(f) match
+              case Some(fScheme) => fScheme.instantiate(refSite.uid, f)
+              case None =>
+                if !generatedVars.contains(f) then
+                  val annotations = f.irFunDefn.map(_.annotations).orElse(f.defn.map(_.annotations)).getOrElse(Nil)
+                  if f.irFunDefn.fold(!f.isPure)(_.params.isEmpty)
+                    && !annotations.exists(_.isInstanceOf[Annot.Pure])
+                  then markUnsafeEta()
+                (generatedVars(f), generatedEffects.getOrElse(f, NoProd))
+            currentEffect.foreach(cc.constrain(accessEffect, _))
+            stratVar
           case s @ SuperSelect(qual, base, _) =>
             markUnsafeEta()
             cc.constrain(processResult(qual), UnknownCons)
@@ -1220,6 +1250,7 @@ class FlowConstraintSolver(val collector: FlowConstraintsCollector):
   val consFunsWithSrcs = mutable.Buffer.empty[ConsFun]
   val functionEffectVars = LinkedHashMap.empty[ConcreteId[FunId], StratVar | NoProd]
   val callEffectVars = LinkedHashMap.empty[ConcreteId[CallId], StratVar | NoProd]
+  val accessEffectVars = LinkedHashMap.empty[ConcreteId[TermSymbol], StratVar | NoProd]
   
   private def addCtorDest(c: Ctor, d: ConcreteCtorConsumer | MarkerConsStrat): Unit =
     if c.dests.isEmpty then ctorsWithDests += c
@@ -1308,6 +1339,8 @@ class FlowConstraintSolver(val collector: FlowConstraintsCollector):
       tl.log("<<< accumulator syms <<<")
   
   locally {
+    for ((symbol, instId), effect) <- collector.accessEffects do
+      accessEffectVars(ConcreteId(symbol, instId.getOrElse(lastWords("uninstantiated access effect")))) = effect
     def hasConcreteInstantiationId(prodOrCons: ProdStrat | ConsStrat): Boolean = prodOrCons match
       case s: StratWithOrigin[?] => s.instantiationId.isDefined
       case _ => true
@@ -1330,6 +1363,7 @@ class FlowConstraintSolver(val collector: FlowConstraintsCollector):
         case c: ConsFun => callEffectVars(c.concreteId) = c.effect
         case _ => ()
       constraint match
+      case (NoProd, _) => ()
       case (c: Ctor, d: Dtor) =>
         addCtorDest(c, d)
         addDtorSrc(d, c)

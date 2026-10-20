@@ -301,6 +301,7 @@ let state = 0
 module M with
   fun get = set state = 42
 //│ flow-analysis > >>> effect-analysis results >>>
+//│ flow-analysis > access get⁰ @ <root> -> UnsafeEta
 //│ flow-analysis > <<< effect-analysis results <<<
 //│ state = 0
 //-
@@ -308,3 +309,27 @@ fun node() = M.get
 //│ flow-analysis > >>> effect-analysis results >>>
 //│ flow-analysis > function node⁰#0 @ <root> -> UnsafeEta
 //│ flow-analysis > <<< effect-analysis results <<<
+
+
+// * A getter observes captured storage.
+let state = 0
+module M with
+  fun get = state
+fun observe() = M.get
+//│ flow-analysis > >>> effect-analysis results >>>
+//│ flow-analysis > function observe⁰#0 @ <root> -> UnsafeEta
+//│ flow-analysis > access get⁰ @ <root> -> UnsafeEta
+//│ flow-analysis > <<< effect-analysis results <<<
+//│ state = 0
+
+
+// * A getter mutates captured storage.
+let state = 0
+module M with
+  fun get = set state = 42
+fun mutate() = M.get
+//│ flow-analysis > >>> effect-analysis results >>>
+//│ flow-analysis > function mutate⁰#0 @ <root> -> UnsafeEta
+//│ flow-analysis > access get⁰ @ <root> -> UnsafeEta
+//│ flow-analysis > <<< effect-analysis results <<<
+//│ state = 0

@@ -51,6 +51,9 @@ object EffectAnalysis:
     solver.callEffectVars.iterator.map: (id, effect) =>
       s"${showCall(id)} -> ${summarize(effect)}"
     .toSeq.sorted.foreach(tl.log(_))
+    solver.accessEffectVars.iterator.map: (id, effect) =>
+      s"access ${symbolPrinter.printSymbol(id.exprId)} @ ${id.instId.showInstId} -> ${summarize(effect)}"
+    .toSeq.sorted.foreach(tl.log(_))
     tl.log("<<< effect-analysis results <<<")
   end logResults
   

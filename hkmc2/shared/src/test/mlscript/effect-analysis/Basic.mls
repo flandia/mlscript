@@ -163,16 +163,50 @@ fun box_unsafe(box: Box) = box.unsafe()
 
 
 // * Getters
-// TODO: Getters are now always unsafe.
 module M with
   fun leaf_pure = 42
   fun leaf_unsafe = unsafe()
 fun node_pure() = M.leaf_pure
 fun node_unsafe() = M.leaf_unsafe
 //│ flow-analysis > >>> effect-analysis results >>>
-//│ flow-analysis > function node_pure⁰#0 @ <root> -> UnsafeEta
+//│ flow-analysis > function node_pure⁰#0 @ <root> -> Pure
 //│ flow-analysis > function node_unsafe⁰#0 @ <root> -> UnsafeEta
 //│ flow-analysis > call unsafe@result⁰#0 @ <root> -> UnsafeEta
+//│ flow-analysis > access leaf_pure⁰ @ <root> -> Pure
+//│ flow-analysis > access leaf_unsafe⁰ @ <root> -> UnsafeEta
+//│ flow-analysis > <<< effect-analysis results <<<
+
+
+// * @pure overrides a getter's body effect.
+module M with
+  @pure fun leaf_pure = unsafe()
+fun node_pure() = M.leaf_pure
+//│ flow-analysis > >>> effect-analysis results >>>
+//│ flow-analysis > function node_pure⁰#0 @ <root> -> Pure
+//│ flow-analysis > call unsafe@result⁰#0 @ <root> -> UnsafeEta
+//│ flow-analysis > access leaf_pure⁰ @ <root> -> Pure
+//│ flow-analysis > <<< effect-analysis results <<<
+
+
+// * @pure is also trusted for getters from an earlier block.
+fun node_pure() = M.leaf_pure
+//│ flow-analysis > >>> effect-analysis results >>>
+//│ flow-analysis > function node_pure⁰#0 @ <root> -> Pure
+//│ flow-analysis > <<< effect-analysis results <<<
+
+
+// * Returning a function does not execute its body.
+module M with
+  fun leaf_pure = () => unsafe()
+fun node_pure() = M.leaf_pure
+fun node_unsafe() = M.leaf_pure()
+//│ flow-analysis > >>> effect-analysis results >>>
+//│ flow-analysis > function lambda⁰#0 @ <root> -> UnsafeEta
+//│ flow-analysis > function node_pure⁰#0 @ <root> -> Pure
+//│ flow-analysis > function node_unsafe⁰#0 @ <root> -> UnsafeEta
+//│ flow-analysis > call leaf_pure@result⁰#0 @ <root> -> UnsafeEta
+//│ flow-analysis > call unsafe@result¹#0 @ <root> -> UnsafeEta
+//│ flow-analysis > access leaf_pure⁰ @ <root> -> Pure
 //│ flow-analysis > <<< effect-analysis results <<<
 
 
@@ -258,15 +292,134 @@ fun node() =
 
 
 // * Getters
-// TODO: Getters are now always unsafe.
 module M with
   fun leaf_pure = 42
   fun leaf_unsafe = unsafe()
 fun node_pure() = M.leaf_pure
 fun node_unsafe() = M.leaf_unsafe
 //│ flow-analysis > >>> effect-analysis results >>>
-//│ flow-analysis > function node_pure⁰#0 @ node_pure¹ -> UnsafeEta
+//│ flow-analysis > function node_pure⁰#0 @ node_pure¹ -> Pure
 //│ flow-analysis > function node_unsafe⁰#0 @ node_unsafe¹ -> UnsafeEta
 //│ flow-analysis > call unsafe@result⁰#0 @ leaf_unsafe⁰ -> UnsafeEta
 //│ flow-analysis > call unsafe@result⁰#0 @ node_unsafe¹.leaf_unsafe¹ -> UnsafeEta
+//│ flow-analysis > access leaf_pure⁰ @ leaf_pure² -> Pure
+//│ flow-analysis > access leaf_pure⁰ @ node_pure¹.leaf_pure¹ -> Pure
+//│ flow-analysis > access leaf_unsafe² @ leaf_unsafe⁰ -> UnsafeEta
+//│ flow-analysis > access leaf_unsafe² @ node_unsafe¹.leaf_unsafe¹ -> UnsafeEta
+//│ flow-analysis > <<< effect-analysis results <<<
+
+
+// * @pure overrides a getter's body effect.
+module M with
+  @pure fun leaf_pure = unsafe()
+fun node_pure() = M.leaf_pure
+//│ flow-analysis > >>> effect-analysis results >>>
+//│ flow-analysis > function node_pure⁰#0 @ node_pure¹ -> Pure
+//│ flow-analysis > call unsafe@result⁰#0 @ leaf_pure⁰ -> UnsafeEta
+//│ flow-analysis > call unsafe@result⁰#0 @ node_pure¹.leaf_pure¹ -> UnsafeEta
+//│ flow-analysis > access leaf_pure² @ leaf_pure⁰ -> Pure
+//│ flow-analysis > access leaf_pure² @ node_pure¹.leaf_pure¹ -> Pure
+//│ flow-analysis > <<< effect-analysis results <<<
+
+
+// * Returning a function does not execute its body.
+module M with
+  fun leaf_pure = () => unsafe()
+fun node_pure() = M.leaf_pure
+fun node_unsafe() = M.leaf_pure()
+//│ flow-analysis > >>> effect-analysis results >>>
+//│ flow-analysis > function lambda⁰#0 @ lambda² -> UnsafeEta
+//│ flow-analysis > function lambda⁰#0 @ leaf_pure⁰.lambda¹ -> UnsafeEta
+//│ flow-analysis > function lambda⁰#0 @ node_pure⁰.leaf_pure².lambda¹ -> UnsafeEta
+//│ flow-analysis > function lambda⁰#0 @ node_unsafe⁰.leaf_pure¹.lambda¹ -> UnsafeEta
+//│ flow-analysis > function node_pure¹#0 @ node_pure⁰ -> Pure
+//│ flow-analysis > function node_unsafe¹#0 @ node_unsafe⁰ -> UnsafeEta
+//│ flow-analysis > call leaf_pure@result¹#0 @ node_unsafe⁰ -> UnsafeEta
+//│ flow-analysis > call unsafe@result⁰#0 @ lambda² -> UnsafeEta
+//│ flow-analysis > call unsafe@result⁰#0 @ leaf_pure⁰.lambda¹ -> UnsafeEta
+//│ flow-analysis > call unsafe@result⁰#0 @ node_pure⁰.leaf_pure².lambda¹ -> UnsafeEta
+//│ flow-analysis > call unsafe@result⁰#0 @ node_unsafe⁰.leaf_pure¹.lambda¹ -> UnsafeEta
+//│ flow-analysis > access leaf_pure³ @ leaf_pure⁰ -> Pure
+//│ flow-analysis > access leaf_pure³ @ node_pure⁰.leaf_pure² -> Pure
+//│ flow-analysis > access leaf_pure³ @ node_unsafe⁰.leaf_pure¹ -> Pure
+//│ flow-analysis > <<< effect-analysis results <<<
+
+
+// * Getter effects remain separate through polymorphic calls.
+fun answer() = 42
+fun apply(f) = f()
+module M with
+  fun leaf_pure = apply(answer)
+  fun leaf_unsafe = apply(unsafe)
+fun node_pure() = M.leaf_pure
+fun node_unsafe() = M.leaf_unsafe
+//│ flow-analysis > >>> effect-analysis results >>>
+//│ flow-analysis > function answer⁰#0 @ answer² -> Pure
+//│ flow-analysis > function answer⁰#0 @ leaf_pure⁰.answer¹ -> Pure
+//│ flow-analysis > function answer⁰#0 @ node_pure⁰.leaf_pure¹.answer¹ -> Pure
+//│ flow-analysis > function apply⁰#0 @ apply³ -> UnsafeEta
+//│ flow-analysis > function apply⁰#0 @ leaf_pure⁰.apply² -> Pure
+//│ flow-analysis > function apply⁰#0 @ leaf_unsafe⁰.apply¹ -> UnsafeEta
+//│ flow-analysis > function apply⁰#0 @ node_pure⁰.leaf_pure¹.apply² -> Pure
+//│ flow-analysis > function apply⁰#0 @ node_unsafe⁰.leaf_unsafe¹.apply¹ -> UnsafeEta
+//│ flow-analysis > function node_pure¹#0 @ node_pure⁰ -> Pure
+//│ flow-analysis > function node_unsafe¹#0 @ node_unsafe⁰ -> UnsafeEta
+//│ flow-analysis > call apply⁰@result²#0 @ leaf_pure⁰ -> Pure
+//│ flow-analysis > call apply⁰@result²#0 @ node_pure⁰.leaf_pure¹ -> Pure
+//│ flow-analysis > call apply⁰@result¹#0 @ leaf_unsafe⁰ -> UnsafeEta
+//│ flow-analysis > call apply⁰@result¹#0 @ node_unsafe⁰.leaf_unsafe¹ -> UnsafeEta
+//│ flow-analysis > call f⁰@result⁰#0 @ apply³ -> UnsafeEta
+//│ flow-analysis > call f⁰@result⁰#0 @ leaf_pure⁰.apply² -> Pure
+//│ flow-analysis > call f⁰@result⁰#0 @ leaf_unsafe⁰.apply¹ -> UnsafeEta
+//│ flow-analysis > call f⁰@result⁰#0 @ node_pure⁰.leaf_pure¹.apply² -> Pure
+//│ flow-analysis > call f⁰@result⁰#0 @ node_unsafe⁰.leaf_unsafe¹.apply¹ -> UnsafeEta
+//│ flow-analysis > access leaf_pure² @ leaf_pure⁰ -> Pure
+//│ flow-analysis > access leaf_pure² @ node_pure⁰.leaf_pure¹ -> Pure
+//│ flow-analysis > access leaf_unsafe² @ leaf_unsafe⁰ -> UnsafeEta
+//│ flow-analysis > access leaf_unsafe² @ node_unsafe⁰.leaf_unsafe¹ -> UnsafeEta
+//│ flow-analysis > <<< effect-analysis results <<<
+
+
+// * Getter effects propagate through recursive functions.
+module M with
+  fun leaf_pure = node_pure()
+  fun leaf_unsafe = node_unsafe()
+fun node_pure() = M.leaf_pure
+fun node_unsafe() = unsafe(); M.leaf_unsafe
+//│ flow-analysis > >>> effect-analysis results >>>
+//│ flow-analysis > function node_pure⁰#0 @ leaf_pure⁰ -> Pure
+//│ flow-analysis > function node_pure⁰#0 @ node_pure¹ -> Pure
+//│ flow-analysis > function node_unsafe⁰#0 @ leaf_unsafe⁰ -> UnsafeEta
+//│ flow-analysis > function node_unsafe⁰#0 @ node_unsafe¹ -> UnsafeEta
+//│ flow-analysis > call ,⁰@result¹#0 @ leaf_unsafe⁰ -> Pure
+//│ flow-analysis > call ,⁰@result¹#0 @ node_unsafe¹ -> Pure
+//│ flow-analysis > call node_pure⁰@result³#0 @ leaf_pure⁰ -> Pure
+//│ flow-analysis > call node_pure⁰@result³#0 @ node_pure¹ -> Pure
+//│ flow-analysis > call node_unsafe⁰@result²#0 @ leaf_unsafe⁰ -> UnsafeEta
+//│ flow-analysis > call node_unsafe⁰@result²#0 @ node_unsafe¹ -> UnsafeEta
+//│ flow-analysis > call unsafe@result⁰#0 @ leaf_unsafe⁰ -> UnsafeEta
+//│ flow-analysis > call unsafe@result⁰#0 @ node_unsafe¹ -> UnsafeEta
+//│ flow-analysis > access leaf_pure¹ @ leaf_pure⁰ -> Pure
+//│ flow-analysis > access leaf_pure¹ @ node_pure¹ -> Pure
+//│ flow-analysis > access leaf_unsafe¹ @ leaf_unsafe⁰ -> UnsafeEta
+//│ flow-analysis > access leaf_unsafe¹ @ node_unsafe¹ -> UnsafeEta
+//│ flow-analysis > <<< effect-analysis results <<<
+
+
+// * A pure getter does not suppress effects from its qualifier.
+fun node_unsafe() = N.get.leaf_pure
+module N with
+  fun get: module M = unsafe(); M
+module M with
+  @pure fun leaf_pure = 42
+//│ flow-analysis > >>> effect-analysis results >>>
+//│ flow-analysis > function node_unsafe⁰#0 @ node_unsafe¹ -> UnsafeEta
+//│ flow-analysis > call ,⁰@result¹#0 @ get⁰ -> Pure
+//│ flow-analysis > call ,⁰@result¹#0 @ node_unsafe¹.get¹ -> Pure
+//│ flow-analysis > call unsafe@result⁰#0 @ get⁰ -> UnsafeEta
+//│ flow-analysis > call unsafe@result⁰#0 @ node_unsafe¹.get¹ -> UnsafeEta
+//│ flow-analysis > access get² @ get⁰ -> UnsafeEta
+//│ flow-analysis > access get² @ node_unsafe¹.get¹ -> UnsafeEta
+//│ flow-analysis > access leaf_pure⁰ @ leaf_pure² -> Pure
+//│ flow-analysis > access leaf_pure⁰ @ node_unsafe¹.leaf_pure¹ -> Pure
 //│ flow-analysis > <<< effect-analysis results <<<
