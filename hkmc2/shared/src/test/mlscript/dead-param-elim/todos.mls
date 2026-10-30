@@ -33,9 +33,9 @@ fun c(x) =
   r
 c(p(true))
 //│ deforest > >>> fusing >>>
-//│ deforest > A⁰ ->
-//│ deforest > 	match: x⁰
 //│ deforest > B⁰ ->
+//│ deforest > 	match: x⁰
+//│ deforest > A⁰ ->
 //│ deforest > 	match: x⁰
 //│ deforest > <<< fusing <<<
 //│ eta-expansion > >>> eta-expansion targets shapes >>>
@@ -92,12 +92,12 @@ fun sumPlus(ls) =
   r + 1
 sumPlus(enum(3))
 //│ deforest > >>> fusing >>>
-//│ deforest > Nil⁰ ->
-//│ deforest > 	match: ls⁰
 //│ deforest > Cons⁰(x¹, tmp⁰) ->
 //│ deforest > 	match: ls⁰
 //│ deforest > 	fields: ls⁰.h⁰
 //│ deforest > 	fields: ls⁰.t⁰
+//│ deforest > Nil⁰ ->
+//│ deforest > 	match: ls⁰
 //│ deforest > <<< fusing <<<
 //│ eta-expansion > >>> eta-expansion targets shapes >>>
 //│ eta-expansion > enum$enum⁰#0 @ <root>: [1, 7]
@@ -174,9 +174,9 @@ fun c(x) = if x is
   B then 2
 c(p(true))
 //│ deforest > >>> fusing >>>
-//│ deforest > A⁰ ->
-//│ deforest > 	match: x²
 //│ deforest > B⁰ ->
+//│ deforest > 	match: x²
+//│ deforest > A⁰ ->
 //│ deforest > 	match: x²
 //│ deforest > <<< fusing <<<
 //│ eta-expansion > >>> eta-expansion targets shapes >>>

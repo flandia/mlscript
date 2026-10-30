@@ -86,13 +86,13 @@ private fun make(flag: Bool) = if flag then A(1) else B()
 private fun fallback(value: Any) = if value is Target then 1 else 0
 [fallback(make(true)), fallback(make(false))]
 //│ deforest > >>> fusing >>>
-//│ deforest > A⁰(1) ->
-//│ deforest > 	match: value²
 //│ deforest > B⁰() ->
 //│ deforest > 	match: value²
 //│ deforest > A⁰(1) ->
 //│ deforest > 	match: value²
 //│ deforest > B⁰() ->
+//│ deforest > 	match: value²
+//│ deforest > A⁰(1) ->
 //│ deforest > 	match: value²
 //│ deforest > <<< fusing <<<
 //│ = [0, 0]

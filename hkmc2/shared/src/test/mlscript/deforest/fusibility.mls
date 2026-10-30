@@ -70,10 +70,8 @@ c(AA(7))
 //│ deforest > cap_ub_(term:lambda,0)_for_lambda⁰
 //│ deforest > cl_for_c¹
 //│ deforest > cl_for_c⁰
-//│ deforest > lambda$_for_lambda$⁰
 //│ deforest > lambda$here_for_c¹
 //│ deforest > lambda$here_for_c⁰
-//│ deforest > lambda_for_lambda⁰
 //│ deforest > p_for_c¹
 //│ deforest > p_for_c⁰
 //│ deforest > p_for_lambda$_for_c¹
@@ -165,8 +163,6 @@ fun c(y) = if y is AA(_) then
   0
 c(AA(1))
 //│ deforest > >>> non-affine syms >>>
-//│ deforest > _d$_for__d$⁰
-//│ deforest > _d_for__d⁰
 //│ deforest > cap_ub_(term:_d$,0)_for__d$⁰
 //│ deforest > cap_ub_(term:_d$,1)_for__d$⁰
 //│ deforest > cap_ub_(term:_d,0)_for__d⁰
@@ -400,7 +396,6 @@ fun flatten(xss) = if xss is
   Nil then Nil
 length(flatten(id((1 :: Nil) :: Nil)))
 //│ deforest > >>> non-affine syms >>>
-//│ deforest > append_for_append⁰
 //│ deforest > cap_ub_(term:append,0)_for_append⁰
 //│ deforest > cap_ub_(term:flatten,0)_for_flatten⁰
 //│ deforest > cap_ub_(term:length,0)_for_length⁰
@@ -408,12 +403,12 @@ length(flatten(id((1 :: Nil) :: Nil)))
 //│ deforest > >>> accumulator syms >>>
 //│ deforest > <<< accumulator syms <<<
 //│ deforest > >>> fusing >>>
+//│ deforest > Nil⁰ ->
+//│ deforest > 	match: ls³
 //│ deforest > Cons⁰(h³, tmp⁴) ->
 //│ deforest > 	match: ls³
 //│ deforest > 	fields: ls³.h¹
 //│ deforest > 	fields: ls³.t⁰
-//│ deforest > Nil⁰ ->
-//│ deforest > 	match: ls³
 //│ deforest > <<< fusing <<<
 //│ = 1
 
@@ -513,9 +508,7 @@ c(mk(7))
 //│ deforest > cap_ub_(term:mk,0)_for_mk⁰
 //│ deforest > cl_for_c¹
 //│ deforest > cl_for_c⁰
-//│ deforest > expensive_for_expensive⁰
 //│ deforest > expensive_res_for_expensive_for_mk⁰
-//│ deforest > g_for_g⁰
 //│ deforest > mk_res_for_mk⁰
 //│ deforest > p_for_c¹
 //│ deforest > p_for_c⁰
@@ -574,7 +567,6 @@ c(AA(7), AA(8))
 //│ deforest > cap_ub_(term:g,1)_for_g⁰
 //│ deforest > cl_for_c¹
 //│ deforest > cl_for_c⁰
-//│ deforest > g_for_g⁰
 //│ deforest > p_for_c¹
 //│ deforest > p_for_c⁰
 //│ deforest > p_for_g_for_c¹
@@ -616,9 +608,7 @@ c(mk(7))
 //│ deforest > cap_ub_(term:mk,0)_for_mk⁰
 //│ deforest > cl_for_c¹
 //│ deforest > cl_for_c⁰
-//│ deforest > expensive_for_expensive⁰
 //│ deforest > expensive_res_for_expensive_for_mk⁰
-//│ deforest > g_for_g⁰
 //│ deforest > mk_res_for_mk⁰
 //│ deforest > p_for_c¹
 //│ deforest > p_for_c⁰
@@ -693,10 +683,7 @@ c(mk(7))
 //│ deforest > cap_ub_(term:lambda$,1)_for_lambda$⁰
 //│ deforest > cap_ub_(term:lambda,0)_for_lambda⁰
 //│ deforest > cap_ub_(term:mk,0)_for_mk⁰
-//│ deforest > expensive_for_expensive⁰
 //│ deforest > expensive_res_for_expensive_for_mk⁰
-//│ deforest > lambda$_for_lambda$⁰
-//│ deforest > lambda_for_lambda⁰
 //│ deforest > mk_res_for_mk⁰
 //│ deforest > p_for_c¹
 //│ deforest > p_for_c⁰

@@ -62,28 +62,28 @@ testZipUnzip(3)
 //│ deforest > >>> fusing >>>
 //│ deforest > Nil⁰ ->
 //│ deforest > 	match: xs_zip⁰
-//│ deforest > Cons⁰(a¹, atail⁰) ->
-//│ deforest > 	match: xs_zip⁰
-//│ deforest > 	fields: xs_zip⁰.h⁰
-//│ deforest > 	fields: xs_zip⁰.t⁰
 //│ deforest > Nil⁰ ->
 //│ deforest > 	match: ys_zip⁰
 //│ deforest > Cons⁰(b¹, btail⁰) ->
 //│ deforest > 	match: ys_zip⁰
 //│ deforest > 	fields: ys_zip⁰.h⁰
 //│ deforest > 	fields: ys_zip⁰.t⁰
-//│ deforest > Nil⁰ ->
-//│ deforest > 	match: xs_zip⁰
 //│ deforest > Cons⁰(a¹, atail⁰) ->
 //│ deforest > 	match: xs_zip⁰
 //│ deforest > 	fields: xs_zip⁰.h⁰
 //│ deforest > 	fields: xs_zip⁰.t⁰
+//│ deforest > Nil⁰ ->
+//│ deforest > 	match: xs_zip⁰
 //│ deforest > Nil⁰ ->
 //│ deforest > 	match: ys_zip⁰
 //│ deforest > Cons⁰(b¹, btail⁰) ->
 //│ deforest > 	match: ys_zip⁰
 //│ deforest > 	fields: ys_zip⁰.h⁰
 //│ deforest > 	fields: ys_zip⁰.t⁰
+//│ deforest > Cons⁰(a¹, atail⁰) ->
+//│ deforest > 	match: xs_zip⁰
+//│ deforest > 	fields: xs_zip⁰.h⁰
+//│ deforest > 	fields: xs_zip⁰.t⁰
 //│ deforest > <<< fusing <<<
 //│ = Cons(Pair(3, 4), Cons(Pair(2, 3), Cons(Pair(1, 2), Nil)))
 
@@ -108,13 +108,13 @@ testZipMapBothUnzip(4)
 //│ deforest > >>> fusing >>>
 //│ deforest > Nil⁰ ->
 //│ deforest > 	match: ls_map⁰
-//│ deforest > Cons⁰(a², atail¹) ->
-//│ deforest > 	match: ls_map⁰
-//│ deforest > 	fields: ls_map⁰.h⁰
-//│ deforest > 	fields: ls_map⁰.t⁰
 //│ deforest > Nil⁰ ->
 //│ deforest > 	match: ls_map⁰
 //│ deforest > Cons⁰(b², btail¹) ->
+//│ deforest > 	match: ls_map⁰
+//│ deforest > 	fields: ls_map⁰.h⁰
+//│ deforest > 	fields: ls_map⁰.t⁰
+//│ deforest > Cons⁰(a², atail¹) ->
 //│ deforest > 	match: ls_map⁰
 //│ deforest > 	fields: ls_map⁰.h⁰
 //│ deforest > 	fields: ls_map⁰.t⁰
@@ -132,13 +132,13 @@ testZipMapBothUnzip(4)
 //│ deforest > 	fields: ys_zip¹.t⁰
 //│ deforest > Nil⁰ ->
 //│ deforest > 	match: ls_map⁰
-//│ deforest > Cons⁰(a², atail¹) ->
-//│ deforest > 	match: ls_map⁰
-//│ deforest > 	fields: ls_map⁰.h⁰
-//│ deforest > 	fields: ls_map⁰.t⁰
 //│ deforest > Nil⁰ ->
 //│ deforest > 	match: ls_map⁰
 //│ deforest > Cons⁰(b², btail¹) ->
+//│ deforest > 	match: ls_map⁰
+//│ deforest > 	fields: ls_map⁰.h⁰
+//│ deforest > 	fields: ls_map⁰.t⁰
+//│ deforest > Cons⁰(a², atail¹) ->
 //│ deforest > 	match: ls_map⁰
 //│ deforest > 	fields: ls_map⁰.h⁰
 //│ deforest > 	fields: ls_map⁰.t⁰

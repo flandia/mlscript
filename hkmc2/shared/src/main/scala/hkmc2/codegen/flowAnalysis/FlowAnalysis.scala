@@ -90,6 +90,13 @@ object FlowAnalysis:
       accumulatorTracking,
     )
     val solver = new FlowConstraintSolver(constrCol)
+    assert(constrCol.solvedStrategies.forall {
+      case s: StratWithOrigin[?] => s.instantiationId.isDefined
+      case _ => true
+    })
+    solver.solve(constrCol.allConstraints, constrCol.solvedStrategies)
+    solver.assertConcreteOrigins()
+    solver.logResults()
     val tl = summon[TraceLogger]
     if logEffects then tl.scoped(TraceScope.Effects):
       if tl.isTracing then EffectAnalysis.logResults(solver)
@@ -343,7 +350,15 @@ case class ConcreteId[A <: OriginId](exprId: A, instId: InstantiationId):
     case r: ResultId => s"${r.getResult}"
 
 
-class ProdStratScheme(val s: StratVar, val constraints: Ls[ProdStrat -> ConsStrat])
+/** The solved graph includes internal sites used by rewriting, even when they are
+  * unreachable from the exported strategy. Environment variables are represented
+  * by local proxies so solving a scheme cannot mutate shared, concrete flows.
+  */
+class ProdStratScheme(
+  val s: StratVar,
+  val strategies: Ls[ProdStrat | ConsStrat],
+  val environment: Ls[StratVar -> StratVar],
+)
 
 class FlowPreAnalyzer(val pgrm: Program)(using
   val tl: TraceLogger,
@@ -740,20 +755,38 @@ class FlowConstraintsCollector(
     val forFunGroup: Opt[TermSymbol],
     val forFun: Opt[TermSymbol],
     buffer: mutable.ListBuffer[ProdStrat -> ConsStrat],
+    val solvedStrategies: mutable.Buffer[ProdStrat | ConsStrat],
+    val environment: LinkedHashMap[StratVar, StratVar],
+    localVariables: MutMap[StratVar, StratVar],
   ):
     def constraints: Ls[ProdStrat -> ConsStrat] = buffer.toList
     val instId: Opt[InstantiationId] = forFunGroup.fold(S(Nil))(_ => N)
     def constrain(p: ProdStrat, c: ConsStrat) = buffer.prepend(p -> c)
-    def constrain(cs: Iterable[ProdStrat -> ConsStrat]) = buffer.prependAll(cs)
+    // Keep even SCC-owned slots separate from the pre-analysis variables: another
+    // scheme can refer to the original slot through its environment (eg captures).
+    // It must never observe this scheme's abstract bounds through that reference.
+    def variable(v: StratVar): StratVar = forFunGroup match
+      case S(group) =>
+        if v.generatedForFun.flatMap(funToSccRep).contains(group) then
+          localVariables.getOrElseUpdate(v, {
+            val local = new StratVar(v.name, v.sourceSymbol, v.generatedForFun, v.instantiationId)
+            fState.stratVars += local
+            if symbolFlowVars(v) then symbolFlowVars += local
+            local
+          })
+        else environment.getOrElseUpdate(v, freshVar(s"env_${v.name}", N, S(group), N))
+      case _ => v
     def forActualRootFun(fun: TermSymbol): ConstraintsCollector =
       assert(preAnalyzer.res.rootFunDefns.contains(fun))
-      new ConstraintsCollector(forFunGroup, S(fun), buffer)
+      new ConstraintsCollector(forFunGroup, S(fun), buffer, solvedStrategies, environment, localVariables)
   private object ConstraintsCollector:
     def apply(forFunGroup: Opt[TermSymbol], forFun: Opt[TermSymbol]): ConstraintsCollector =
-      new ConstraintsCollector(forFunGroup, forFun, mutable.ListBuffer.empty)
+      new ConstraintsCollector(forFunGroup, forFun, mutable.ListBuffer.empty,
+        mutable.Buffer.empty, LinkedHashMap.empty, MutMap.empty)
   
   private val globalCollector = ConstraintsCollector(N, N)
   def allConstraints = globalCollector.constraints
+  def solvedStrategies: Iterable[ProdStrat | ConsStrat] = globalCollector.solvedStrategies
   val funToSccGroups = MutMap.empty[TermSymbol, Ls[TermSymbol]]
   def funToSccRep(tSym: TermSymbol): Option[TermSymbol] = funToSccGroups.get(tSym).map(_.head)
   
@@ -765,13 +798,17 @@ class FlowConstraintsCollector(
     if cc.forFunGroup.isEmpty then allRealCtors += c
     c
   
-  private val generatedVars: collection.Map[Symbol, StratVar] = // TODO: tighten `Symbol` type!
+  private val originalVars: collection.Map[Symbol, StratVar] = // TODO: tighten `Symbol` type!
     preAnalyzer.res.generatedVars.withDefaultValue(preAnalyzer.res.primitiveStratVar)
+  private def generatedVars(sym: Symbol)(using cc: ConstraintsCollector): StratVar =
+    cc.variable(originalVars(sym))
   // Unknown getter effects must not flow into primitiveStratVar: its bounds also
   // feed runtime value slots, where effect markers have no representation.
   private val unknownEffect = freshVar("unknown_effect")
-  private val generatedEffects: collection.Map[Symbol, StratVar] = // TODO: tighten `Symbol` type! // TODO: use at access sites of getters!
+  private val originalEffects: collection.Map[Symbol, StratVar] = // TODO: tighten `Symbol` type! // TODO: use at access sites of getters!
     preAnalyzer.res.generatedEffects.withDefaultValue(unknownEffect)
+  private def generatedEffects(sym: Symbol)(using cc: ConstraintsCollector): StratVar =
+    cc.variable(originalEffects(sym))
 
   // * This is for effect analysis. The nonlocal variables that are potentially shared. 
   // * If a function accesses a nonlocal, it is conservatively considered unsafe for eta-expansion. 
@@ -779,8 +816,8 @@ class FlowConstraintsCollector(
     .filterNot(_ == eState.runtimeSymbol).toSet
   
   // Keep the solved flows for each physical copy of a symbol. A representation-changing
-  // rewrite needs locals as well as parameters; the original scheme variables have no
-  // solved bounds, and variables copied through several schemes retain the full path.
+  // rewrite needs locals as well as parameters. Variables copied through several
+  // schemes retain the full instantiation path.
   val symbolFlows = mutable.Buffer.empty[(Symbol, InstantiationId, StratVar)]
   // Effect variables also name their source function, but their bounds describe effects,
   // not that function's value. Only copies of runtime slots can determine erased types.
@@ -818,9 +855,15 @@ class FlowConstraintsCollector(
                 sym <- preAnalyzer.res.nonAffineSyms
                 stratVar <- preAnalyzer.res.generatedVars.get(sym)
                 if stratVar.generatedForFun.flatMap(funToSccRep).contains(groupRep)
-              do cc.constrain(stratVar, NonAffine)
+              do cc.constrain(cc.variable(stratVar), NonAffine)
+            val solver = new FlowConstraintSolver(FlowConstraintsCollector.this)
+            val constraints = cc.constraints
+            solver.solve(constraints, cc.solvedStrategies)
+            val strategies =
+              (constraints.flatMap((p, c) => p :: c :: Nil) ::: cc.solvedStrategies.toList).distinct
             for funSym <- groupedFuns do
-              funsToProdStratScheme(funSym) = ProdStratScheme(generatedVars(funSym), cc.constraints)
+              funsToProdStratScheme(funSym) =
+                ProdStratScheme(generatedVars(funSym), strategies, cc.environment.toList)
       end ProdStratSchemeAnalysisInScc
       
       ProdStratSchemeAnalysisInScc.queryAll(preAnalyzer.res.rootFunDefns.keys)
@@ -875,64 +918,132 @@ class FlowConstraintsCollector(
     )(using cc: ConstraintsCollector): StratVar =
       val groupRep: TermSymbol = funToSccRep(referringTo).get
       val stratVarMap = MutMap.empty[StratVar, StratVar]
+      for (external, local) <- pScheme.environment do
+        stratVarMap(local) = cc.variable(external)
+      val prodFunMap = MutMap.empty[ProdFun, ProdFun]
+      val ctorMap = MutMap.empty[Ctor, Ctor]
+      val consFunMap = MutMap.empty[ConsFun, ConsFun]
+      val castMap = MutMap.empty[CastConsumer, CastConsumer]
+      val fieldMap = MutMap.empty[FieldSel, FieldSel]
+      val dtorMap = MutMap.empty[Dtor, Dtor]
+      // Bounds and metadata can lead back to a strategy whose immutable shape is
+      // still being copied. Populate them only after its shell has been memoized.
+      val pending = mutable.Queue.empty[() => Unit]
       def updateInstantiationId(instId: Opt[InstantiationId]) =
         S(instId.fold(referSite :: Nil)(referSite :: _))
       def duplicateVarStateOpt(s: StratVar | NoProd): StratVar | NoProd =
         s match
         case v: StratVar => duplicateVarState(v)
         case NoProd => NoProd
-      def duplicateVarState(s: StratVar) =
-        if s.generatedForFun.fold(false):
-          forFun => funToSccRep(forFun).fold(false)(_ is groupRep)
-        then stratVarMap.getOrElseUpdate(s, {
+      def duplicateVarState(s: StratVar): StratVar =
+        assert(s.generatedForFun.flatMap(funToSccRep).contains(groupRep))
+        stratVarMap.getOrElseUpdate(s, {
           val instId = updateInstantiationId(s.instantiationId)
           val v = freshVar(s.name, s.sourceSymbol, cc.forFun, instId)
           if symbolFlowVars(s) then
             symbolFlowVars += v
             for sym <- s.sourceSymbol if cc.forFunGroup.isEmpty do
               symbolFlows += ((sym, instId.get, v))
+          pending.enqueue(() => {
+            v.lowerBounds ++= s.lowerBounds.iterator.map(duplicateProdStrat)
+            v.upperBounds ++= s.upperBounds.iterator.map(duplicateConsStrat)
+          })
           v
         })
-        else s
+      def duplicateProdFun(p: ProdFun): ProdFun = prodFunMap.getOrElseUpdate(p, {
+        val copy = new ProdFun(p.exprId, updateInstantiationId(p.instantiationId))(
+          p.params.map(duplicateConsStrat),
+          p.requiredParamCount,
+          p.restParam.map(duplicateConsStrat),
+          duplicateProdStrat(p.res),
+          duplicateVarState(p.capturedVarUpperbound),
+          duplicateVarStateOpt(p.effect))
+        cc.solvedStrategies += copy
+        pending.enqueue(() => copy.dests ++= p.dests.iterator.map {
+          case c: ConsFun => duplicateConsFun(c)
+          case c: MarkerConsStrat => c
+        })
+        copy
+      })
+      def duplicateCtor(c: Ctor): Ctor = ctorMap.getOrElseUpdate(c, {
+        val copy = registerCtor(new Ctor(c.exprId, updateInstantiationId(c.instantiationId))(
+          c.ctor, c.args.map((a, b) => a -> duplicateProdStrat(b))))
+        cc.solvedStrategies += copy
+        pending.enqueue(() => copy.dests ++= c.dests.iterator.map {
+          case d: ConcreteCtorConsumer => duplicateCtorConsumer(d)
+          case d: MarkerConsStrat => d
+        })
+        copy
+      })
+      def duplicateConsFun(c: ConsFun): ConsFun = consFunMap.getOrElseUpdate(c, {
+        val copy = new ConsFun(c.exprId, updateInstantiationId(c.instantiationId))(
+          c.params.map(duplicateProdStrat), duplicateConsStrat(c.res), duplicateVarStateOpt(c.effect))
+        cc.solvedStrategies += copy
+        pending.enqueue(() => copy.srcs ++= c.srcs.iterator.map {
+          case p: ProdFun => duplicateProdFun(p)
+          case p: MarkerProdStrat => p
+        })
+        copy
+      })
+      def duplicateCast(c: CastConsumer): CastConsumer = castMap.getOrElseUpdate(c, {
+        val copy = new CastConsumer(c.exprId, updateInstantiationId(c.instantiationId), c.target)
+        cc.solvedStrategies += copy
+        pending.enqueue(() => {
+          copy.sources ++= c.sources.iterator.map(duplicateProdStrat)
+          copy.succeeds = c.succeeds
+        })
+        copy
+      })
+      def duplicateCtorConsumer(c: ConcreteCtorConsumer): FieldSel | Dtor = c match
+        case c: FieldSel => fieldMap.getOrElseUpdate(c, {
+          val copy = new FieldSel(c.exprId, updateInstantiationId(c.instantiationId))(
+            c.field, c.selectsFrom, duplicateVarState(c.consVar))
+          cc.solvedStrategies += copy
+          pending.enqueue(() => copy.srcs ++= c.srcs.iterator.map {
+            case p: Ctor => duplicateCtor(p)
+            case p: MarkerProdStrat => p
+          })
+          copy
+        })
+        case c: Dtor => dtorMap.getOrElseUpdate(c, {
+          val copy = new Dtor(c.exprId, updateInstantiationId(c.instantiationId))
+          cc.solvedStrategies += copy
+          pending.enqueue(() => copy.srcs ++= c.srcs.iterator.map {
+            case p: Ctor => duplicateCtor(p)
+            case p: MarkerProdStrat => p
+          })
+          copy
+        })
       def duplicateProdStrat(s: ProdStrat): ProdStrat = s match
         case v: StratVar => duplicateVarState(v)
-        case p: ProdFun =>
-          new ProdFun(p.exprId, updateInstantiationId(p.instantiationId))(
-            p.params.map(duplicateConsStrat),
-            p.requiredParamCount,
-            p.restParam.map(duplicateConsStrat),
-            duplicateProdStrat(p.res),
-            duplicateVarState(p.capturedVarUpperbound),
-            duplicateVarStateOpt(p.effect))
-        case UnknownProd => UnknownProd
-        case UnsafeEta => UnsafeEta
+        case p: ProdFun => duplicateProdFun(p)
+        case c: Ctor => duplicateCtor(c)
+        case s: MarkerProdStrat => s
         case NoProd => NoProd
-        case c: Ctor => registerCtor(
-          new Ctor(c.exprId, updateInstantiationId(c.instantiationId))(
-            c.ctor,
-            c.args.map((a, b) => a -> duplicateProdStrat(b))))
       def duplicateConsStrat(c: ConsStrat): ConsStrat = c match
         case v: StratVar => duplicateVarState(v)
-        case c: ConsFun =>
-          new ConsFun(c.exprId, updateInstantiationId(c.instantiationId))(
-            c.params.map(duplicateProdStrat),
-            duplicateConsStrat(c.res),
-            duplicateVarStateOpt(c.effect))
-        case c: CastConsumer => new CastConsumer(c.exprId, updateInstantiationId(c.instantiationId), c.target)
-        case UnknownCons => UnknownCons
-        case NonAffine => NonAffine
-        case Accumulator => Accumulator
+        case c: ConsFun => duplicateConsFun(c)
+        case c: CastConsumer => duplicateCast(c)
+        case c: MarkerConsStrat => c
         case pAcc: PossibleAccumulator => duplicateVarState(pAcc.s).asPossibleAccumulator
         case iPrm: IntoParam => duplicateVarState(iPrm.s).asIntoParam
-        case fSel: FieldSel =>
-          new FieldSel(fSel.exprId, updateInstantiationId(fSel.instantiationId))(
-            fSel.field,
-            fSel.selectsFrom,
-            duplicateVarState(fSel.consVar))
-        case dtor: Dtor => new Dtor(dtor.exprId, updateInstantiationId(dtor.instantiationId))
+        case c: (FieldSel | Dtor) => duplicateCtorConsumer(c)
       val newProd = duplicateVarState(pScheme.s)
-      pScheme.constraints.foreach: (p, c) =>
-        cc.constrain(duplicateProdStrat(p), duplicateConsStrat(c))
+      // Internal nodes are retained for rewriting and erased slot types, but their
+      // constraints have already been solved. Copy the graph without replaying them.
+      pScheme.strategies.foreach {
+        case v: StratVar => duplicateVarState(v)
+        case p: ProdStrat => duplicateProdStrat(p)
+        case c: ConsStrat => duplicateConsStrat(c)
+      }
+      // Substitute shared slots for the environment proxies. Only their boundary
+      // bounds need solving against the surrounding program; internal bounds and
+      // producer/consumer relationships are already solved in the copied graph.
+      for (_, local) <- pScheme.environment do
+        val shared = stratVarMap(local)
+        local.lowerBounds.foreach(p => cc.constrain(duplicateProdStrat(p), shared))
+        local.upperBounds.foreach(c => cc.constrain(shared, duplicateConsStrat(c)))
+      while pending.nonEmpty do pending.dequeue()()
       newProd
     
     extension (v: StratVar)
@@ -978,9 +1089,9 @@ class FlowConstraintsCollector(
           val capUB = freshVar(s"cap_ub_$plFunId", cc.forFun)
           for
             v <- preAnalyzer.res.capturedVars(plFunId)
-            capturedSymStrat <- generatedVars.get(v)
+            capturedSymStrat <- preAnalyzer.res.generatedVars.get(v)
           do
-            cc.constrain(capturedSymStrat, capUB)
+            cc.constrain(cc.variable(capturedSymStrat), capUB)
           new ProdFun(plFunId, cc.instId)(
             ps.params.map(p => generatedVars(p.sym)),
             ps.paramCountLB,
@@ -1285,19 +1396,46 @@ class FlowConstraintSolver(val collector: FlowConstraintsCollector):
   val castsWithSrcs = mutable.Buffer.empty[CastConsumer]
   val functionEffectVars = LinkedHashMap.empty[ConcreteId[FunId], StratVar | NoProd]
   val callEffectVars = LinkedHashMap.empty[ConcreteId[CallId], StratVar | NoProd]
+  private val registeredMetadata = MutSet.empty[StratWithOrigin[?]]
+
+  def assertConcreteOrigins(): Unit =
+    assert(registeredMetadata.forall(_.instantiationId.isDefined), "abstract strategy escaped its scheme")
+
+  private def registerFunctionEffects(prod: ProdStrat): Unit = prod match
+    case p: ProdFun =>
+      if p.instantiationId.isDefined then functionEffectVars(p.concreteId) = p.effect
+      registerFunctionEffects(p.res)
+    case _ => ()
+
+  // Copied scheme nodes already carry their solved relationships. Index those
+  // relationships without passing them through constraint propagation again.
+  private def registerSolved(strat: ProdStrat | ConsStrat): Unit = strat match
+    case c: Ctor =>
+      if c.dests.nonEmpty && registeredMetadata.add(c) then ctorsWithDests += c
+    case d: ConcreteCtorConsumer =>
+      if d.srcs.nonEmpty && registeredMetadata.add(d) then consumersWithSrcs += d
+    case p: ProdFun =>
+      registerFunctionEffects(p)
+      if p.dests.nonEmpty && registeredMetadata.add(p) then prodFunsWithDests += p
+    case c: ConsFun =>
+      if c.instantiationId.isDefined then callEffectVars(c.concreteId) = c.effect
+      if c.srcs.nonEmpty && registeredMetadata.add(c) then consFunsWithSrcs += c
+    case c: CastConsumer =>
+      if c.sources.nonEmpty && registeredMetadata.add(c) then castsWithSrcs += c
+    case _ => ()
   
   private def addCtorDest(c: Ctor, d: ConcreteCtorConsumer | MarkerConsStrat): Unit =
-    if c.dests.isEmpty then ctorsWithDests += c
     c.dests += d
+    registerSolved(c)
   private def addDtorSrc(d: ConcreteCtorConsumer, p: Ctor | MarkerProdStrat): Unit =
-    if d.srcs.isEmpty then consumersWithSrcs += d
     d.srcs += p
+    if registeredMetadata.add(d) then consumersWithSrcs += d
   private def addFunDest(p: ProdFun, c: ConsFun | MarkerConsStrat): Unit =
-    if p.dests.isEmpty then prodFunsWithDests += p
     p.dests += c
+    registerSolved(p)
   private def addFunSrc(c: ConsFun, p: ProdFun | MarkerProdStrat): Unit =
-    if c.srcs.isEmpty then consFunsWithSrcs += c
     c.srcs += p
+    registerSolved(c)
   
   /** Whether instances of `cls` may have the fields of `ancestor` through inheritance.
     * A class whose parent chain is not known is assumed to possibly inherit them.
@@ -1346,6 +1484,7 @@ class FlowConstraintSolver(val collector: FlowConstraintsCollector):
       val outputRes =
         for
           stratVar <- fState.stratVars
+          if collector.mono || stratVar.generatedForFun.isEmpty
           if AllUpperBounds(stratVar).contains(NonAffine)
         yield summon[SymbolPrinter].printSymbol(stratVar)
       for nonAffine <- outputRes.toSortedSet do
@@ -1365,6 +1504,7 @@ class FlowConstraintSolver(val collector: FlowConstraintsCollector):
       val outputRes =
         for
           stratVar <- fState.stratVars
+          if collector.mono || stratVar.generatedForFun.isEmpty
           if AllUpperBounds(stratVar).contains(Accumulator)
           accumulatorSym <- showAccumulatorSym(stratVar)
         yield accumulatorSym
@@ -1372,27 +1512,19 @@ class FlowConstraintSolver(val collector: FlowConstraintsCollector):
         tl.log(accumulator)
       tl.log("<<< accumulator syms <<<")
   
-  locally {
-    def hasConcreteInstantiationId(prodOrCons: ProdStrat | ConsStrat): Boolean = prodOrCons match
-      case s: StratWithOrigin[?] => s.instantiationId.isDefined
-      case _ => true
-    def registerFunctionEffects(prod: ProdStrat): Unit = prod match
-      case p: ProdFun =>
-        functionEffectVars(p.concreteId) = p.effect
-        registerFunctionEffects(p.res)
-      case _ => ()
+  def solve(
+    constraints: Iterable[ProdStrat -> ConsStrat],
+    solved: Iterable[ProdStrat | ConsStrat],
+  ): Unit =
+    solved.foreach(registerSolved)
     def inferredCallEffect(c: ConsFun): StratVar | NoProd =
       c.exprId.exprId.getResult match
         case call: Call if FlowAnalysis.isPureCall(call, c.exprId.whichArgList) => NoProd
         case _ => c.effect
     def handle(constraint: ProdStrat -> ConsStrat): Unit =
-      assert:
-        val (prod, cons) = constraint
-        hasConcreteInstantiationId(prod) &&
-        hasConcreteInstantiationId(cons)
       registerFunctionEffects(constraint._1)
       constraint._2 match
-        case c: ConsFun => callEffectVars(c.concreteId) = c.effect
+        case c: ConsFun if c.instantiationId.isDefined => callEffectVars(c.concreteId) = c.effect
         case _ => ()
       constraint match
       case (c: Ctor, d: Dtor) =>
@@ -1487,8 +1619,8 @@ class FlowConstraintSolver(val collector: FlowConstraintsCollector):
       case (p, c: StratVar) => if c.lowerBounds.add(p) then
         for u <- c.upperBounds do handle(p, u)
       case (p, c: CastConsumer) =>
-        if c.sources.isEmpty then castsWithSrcs += c
         if c.sources.add(p) then
+          registerSolved(c)
           val actual = p match
             case ctor: Ctor => S(ctor.allocatedType)
             case _: ProdFun => S(ErasedType.Function(S(false)))
@@ -1504,11 +1636,12 @@ class FlowConstraintSolver(val collector: FlowConstraintsCollector):
       case _ => () // ignore other cases
     end handle
     
-    for c <- collector.allConstraints do handle(c)
-  }
+    for c <- constraints do handle(c)
+  end solve
   
-  logNonAffineSyms
-  logAccumulatorSyms
+  def logResults(): Unit =
+    logNonAffineSyms
+    logAccumulatorSyms
 
 
 end FlowConstraintSolver
