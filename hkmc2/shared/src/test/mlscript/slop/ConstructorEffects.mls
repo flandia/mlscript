@@ -50,10 +50,10 @@ fun callback(run: () -> Int) = Callback(run)
 //│ flow-analysis > function observed⁰#0 @ <root> -> UnsafeEta
 //│ flow-analysis > function update⁰#0 @ <root> -> UnsafeEta
 //│ flow-analysis > function written⁰#0 @ <root> -> UnsafeEta
-//│ flow-analysis > call +⁰@result³#0 @ <root> -> Pure
-//│ flow-analysis > call +⁰@result¹#0 @ <root> -> Pure
-//│ flow-analysis > call run@result⁰#0 @ <root> -> UnsafeEta
-//│ flow-analysis > call update⁰@result²#0 @ <root> -> UnsafeEta
+//│ flow-analysis > call +⁰@result²#0 @ <root> -> Pure
+//│ flow-analysis > call +⁰@result⁰#0 @ <root> -> Pure
+//│ flow-analysis > call run@result¹#0 @ <root> -> UnsafeEta
+//│ flow-analysis > call update⁰@result³#0 @ <root> -> UnsafeEta
 //│ flow-analysis > <<< effect-analysis results <<<
 //│ state = 0
 
@@ -95,10 +95,10 @@ val saved = make()
 //│ flow-analysis > function keep⁰#0 @ <root> -> Pure
 //│ flow-analysis > function keep⁰#1 @ <root> -> UnsafeEta
 //│ flow-analysis > function make⁰#0 @ <root> -> UnsafeEta
-//│ flow-analysis > call +⁰@result²#0 @ <root> -> Pure
-//│ flow-analysis > call keep⁰@result³#0 @ <root> -> Pure
-//│ flow-analysis > call make⁰@result¹#0 @ <root> -> UnsafeEta
-//│ flow-analysis > call saved⁰@result⁰#0 @ <root> -> UnsafeEta
+//│ flow-analysis > call +⁰@result³#0 @ <root> -> Pure
+//│ flow-analysis > call keep⁰@result⁰#0 @ <root> -> Pure
+//│ flow-analysis > call make⁰@result²#0 @ <root> -> UnsafeEta
+//│ flow-analysis > call saved⁰@result¹#0 @ <root> -> UnsafeEta
 //│ flow-analysis > <<< effect-analysis results <<<
 //│ = [1, 7]
 //│ calls = 1
@@ -118,9 +118,9 @@ saved_snapshot()
 //│ flow-analysis > function keep_snapshot⁰#0 @ <root> -> Pure
 //│ flow-analysis > function keep_snapshot⁰#1 @ <root> -> UnsafeEta
 //│ flow-analysis > function snapshot⁰#0 @ <root> -> UnsafeEta
-//│ flow-analysis > call keep_snapshot⁰@result²#0 @ <root> -> Pure
-//│ flow-analysis > call saved_snapshot⁰@result⁰#0 @ <root> -> UnsafeEta
-//│ flow-analysis > call snapshot⁰@result¹#0 @ <root> -> UnsafeEta
+//│ flow-analysis > call keep_snapshot⁰@result⁰#0 @ <root> -> Pure
+//│ flow-analysis > call saved_snapshot⁰@result¹#0 @ <root> -> UnsafeEta
+//│ flow-analysis > call snapshot⁰@result²#0 @ <root> -> UnsafeEta
 //│ flow-analysis > <<< effect-analysis results <<<
 //│ = 41
 //│ current = 42

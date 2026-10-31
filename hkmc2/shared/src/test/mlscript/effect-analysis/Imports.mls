@@ -29,9 +29,9 @@ fun pure_callback(x) = invoke(y => y, x)
 //│ flow-analysis > function invoke⁰#0 @ <root> -> UnsafeEta
 //│ flow-analysis > function lambda⁰#0 @ <root> -> Pure
 //│ flow-analysis > function pure_callback⁰#0 @ <root> -> UnsafeEta
-//│ flow-analysis > call f⁰@result²#0 @ <root> -> UnsafeEta
+//│ flow-analysis > call f⁰@result⁰#0 @ <root> -> UnsafeEta
+//│ flow-analysis > call invoke⁰@result²#0 @ <root> -> UnsafeEta
 //│ flow-analysis > call invoke⁰@result¹#0 @ <root> -> UnsafeEta
-//│ flow-analysis > call invoke⁰@result⁰#0 @ <root> -> UnsafeEta
 //│ flow-analysis > <<< effect-analysis results <<<
 
 

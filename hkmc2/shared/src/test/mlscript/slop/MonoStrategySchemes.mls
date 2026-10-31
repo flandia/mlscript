@@ -1,0 +1,305 @@
+:.
+:js
+:noInline
+
+
+// One physical indirect call can reach targets that use opposite arguments.
+// Mono analysis must keep one compatible argument layout for all three bodies.
+:flowBasedOpt mono debugDpe
+:checkIR
+:soir
+:expect [1, 4]
+private fun applyTarget(target, first, second) = target(first, second)
+private fun takeFirst(first, second) = first
+private fun takeSecond(first, second) = second
+[applyTarget(takeFirst, 1, 2), applyTarget(takeSecond, 3, 4)]
+//│ dead-param-elim > >>> dead-param-elim results >>>
+//│ dead-param-elim > <<< dead-param-elim results <<<
+//│ ——————————————| Optimized IR |——————————————————————————————————————————————————————————————————————
+//│ let tmp, tmp1;
+//│ @private
+//│ define applyTarget⁰ as fun applyTarget¹(target, first, second) {
+//│   return (target(first, second) as! Int⁰)
+//│ };
+//│ @private
+//│ define takeFirst⁰ as fun takeFirst¹(first, second) {
+//│   return first
+//│ };
+//│ @private
+//│ define takeSecond⁰ as fun takeSecond¹(first, second) {
+//│   return second
+//│ };
+//│ set tmp = applyTarget¹(takeFirst¹, 1, 2);
+//│ set tmp1 = applyTarget¹(takeSecond¹, 3, 4);
+//│ return [tmp, tmp1]
+//│ —————————————————| Output |—————————————————————————————————————————————————————————————————————————
+//│ = [1, 4]
+
+
+// Poly mode can specialize those same references independently. Both modes use
+// the same schemes, but only this mode may emit copies for the separate uses.
+:flowBasedOpt poly debugDpe
+:checkIR
+:soir
+:expect [1, 4]
+private fun applyTarget(target, first, second) = target(first, second)
+private fun takeFirst(first, second) = first
+private fun takeSecond(first, second) = second
+[applyTarget(takeFirst, 1, 2), applyTarget(takeSecond, 3, 4)]
+//│ dead-param-elim > >>> dead-param-elim results >>>
+//│ dead-param-elim > applyTarget²#0 @ applyTarget³ -> eliminable: {1}
+//│ dead-param-elim > takeSecond²#0 @ takeSecond³ -> eliminable: {0}
+//│ dead-param-elim > applyTarget²#0 @ applyTarget⁴ -> eliminable: {2}
+//│ dead-param-elim > takeFirst²#0 @ takeFirst³ -> eliminable: {1}
+//│ dead-param-elim > <<< dead-param-elim results <<<
+//│ ——————————————| Optimized IR |——————————————————————————————————————————————————————————————————————
+//│ let tmp, tmp1, applyTarget$applyTarget, takeSecond$takeSecond, applyTarget$applyTarget1, takeFirst$takeFirst;
+//│ @private @private
+//│ define applyTarget$applyTarget as fun applyTarget$applyTarget⁰(target, second) {
+//│   return (target(second) as! Int⁰)
+//│ };
+//│ @private @private
+//│ define takeSecond$takeSecond as fun takeSecond$takeSecond⁰(second) {
+//│   return second
+//│ };
+//│ @private @private
+//│ define applyTarget$applyTarget1 as fun applyTarget$applyTarget¹(target, first) {
+//│   return (target(first) as! Int⁰)
+//│ };
+//│ @private @private
+//│ define takeFirst$takeFirst as fun takeFirst$takeFirst⁰(first) {
+//│   return first
+//│ };
+//│ @private
+//│ define applyTarget² as fun applyTarget³(target, first, second) {
+//│   return (target(first, second) as! Int⁰)
+//│ };
+//│ @private
+//│ define takeFirst² as fun takeFirst³(first, second) {
+//│   return first
+//│ };
+//│ @private
+//│ define takeSecond² as fun takeSecond³(first, second) {
+//│   return second
+//│ };
+//│ set tmp = applyTarget$applyTarget¹(takeFirst$takeFirst⁰, 1);
+//│ set tmp1 = applyTarget$applyTarget⁰(takeSecond$takeSecond⁰, 4);
+//│ return [tmp, tmp1]
+//│ —————————————————| Output |—————————————————————————————————————————————————————————————————————————
+//│ = [1, 4]
+
+
+// The value is dead for one callback and live for the other. A shared invoke
+// must retain it, even when the first callback's scheme does not consume it.
+:flowBasedOpt mono debugDpe
+:checkIR
+:soir
+:expect [0, 42]
+private fun invoke(callback, value) = callback(value)
+private fun ignore(value) = 0
+private fun identity(value) = value
+[invoke(ignore, 1), invoke(identity, 42)]
+//│ dead-param-elim > >>> dead-param-elim results >>>
+//│ dead-param-elim > <<< dead-param-elim results <<<
+//│ ——————————————| Optimized IR |——————————————————————————————————————————————————————————————————————
+//│ let tmp, tmp1;
+//│ @private
+//│ define invoke⁰ as fun invoke¹(callback, value) {
+//│   return (callback(value) as! Int⁰)
+//│ };
+//│ @private
+//│ define ignore⁰ as fun ignore¹(value) {
+//│   return 0
+//│ };
+//│ @private
+//│ define identity⁰ as fun identity¹(value) {
+//│   return value
+//│ };
+//│ set tmp = invoke¹(ignore¹, 1);
+//│ set tmp1 = invoke¹(identity¹, 42);
+//│ return [tmp, tmp1]
+//│ —————————————————| Output |—————————————————————————————————————————————————————————————————————————
+//│ = [0, 42]
+
+
+// Calls through an SCC must reuse the mono nodes of both recursive members.
+// The extra argument is dead throughout the cycle and can still be removed.
+:flowBasedOpt mono debugDpe
+:checkIR
+:expect 42
+private fun even(n: Int, unused) = if n == 0 then 21 else odd(n - 1, unused)
+private fun odd(n: Int, unused) = even(n, unused)
+even(2, "unused") + odd(1, "unused")
+//│ dead-param-elim > >>> dead-param-elim results >>>
+//│ dead-param-elim > even_odd⁰#0 @ <root> -> eliminable: {2}
+//│ dead-param-elim > odd⁰#0 @ <root> -> eliminable: {1}
+//│ dead-param-elim > even⁰#0 @ <root> -> eliminable: {1}
+//│ dead-param-elim > <<< dead-param-elim results <<<
+//│ = 42
+
+
+// Public definitions and private functions that escape through a public value
+// must retain the calling convention expected by unknown callers.
+:flowBasedOpt mono debugDpe
+:checkIR
+:soir
+:expect [21, 21, 42]
+fun exported(first, second) = first
+private fun escaping(first, second) = first
+val exportedCallback = escaping
+[escaping(21, 0), exportedCallback(21, 0), exported(42, 0)]
+//│ dead-param-elim > >>> dead-param-elim results >>>
+//│ dead-param-elim > <<< dead-param-elim results <<<
+//│ ——————————————| Optimized IR |——————————————————————————————————————————————————————————————————————
+//│ let tmp, tmp1, tmp2;
+//│ define exported⁰ as fun exported¹(first, second) {
+//│   return first
+//│ };
+//│ @private
+//│ define escaping⁰ as fun escaping¹(first, second) {
+//│   return first
+//│ };
+//│ define exportedCallback⁰ as val exportedCallback¹ = escaping¹;
+//│ set tmp = escaping¹(21, 0);
+//│ set tmp1 = exportedCallback¹(21, 0);
+//│ set tmp2 = exported¹(42, 0);
+//│ return [tmp, tmp1, tmp2]
+//│ —————————————————| Output |—————————————————————————————————————————————————————————————————————————
+//│ = [21, 21, 42]
+//│ exportedCallback = fun escaping
+
+
+// A shared constructor site cannot change representation for selected calls
+// when another use escapes through a public value.
+:flowBasedOpt mono
+:deforest mono
+:lift
+:checkIR
+:soir
+:siret
+:expect 42
+data class MonoBox(value: Int)
+private fun produce(value: Int) = MonoBox(value)
+private fun project(box: MonoBox): Int = box.value
+val leakedBox = produce(20)
+project(produce(22)) + leakedBox.value
+//│ deforest > >>> fusing >>>
+//│ deforest > <<< fusing <<<
+//│ ——————————————| Optimized IR |——————————————————————————————————————————————————————————————————————
+//│ let tmp: MonoBox⁰, tmp1: MonoBox⁰, tmp2: Int⁰;
+//│ @private
+//│ define produce⁰ as fun produce¹(value: Int⁰): MonoBox⁰ {
+//│   return MonoBox¹(value)
+//│ };
+//│ @private
+//│ define project⁰ as fun project¹(box: MonoBox⁰): Int⁰ {
+//│   return box.value⁰
+//│ };
+//│ @data
+//│ define MonoBox² as class MonoBox⁰ {
+//│   val value¹: Int⁰;
+//│   constructor MonoBox¹(value: Int⁰) {
+//│     define value¹ as val value⁰: Int⁰ = value;
+//│     end
+//│   }
+//│ };
+//│ set tmp = produce¹(20);
+//│ define leakedBox⁰ as val leakedBox¹: MonoBox⁰ = tmp;
+//│ set tmp1 = produce¹(22);
+//│ set tmp2 = project¹(tmp1);
+//│ return +⁰(tmp2, leakedBox¹.value⁰)
+//│ —————————————————| Output |—————————————————————————————————————————————————————————————————————————
+//│ = 42
+//│ leakedBox = MonoBox(20)
+
+
+// Both call references instantiate the same physical cast in mono mode. The
+// incompatible producer must make both constructors observable by the cast,
+// although this execution takes only the successful branch.
+:flowBasedOpt mono
+:deforest mono
+:lift
+:checkIR
+:soir
+:expect 42
+data class MonoCastBox(value: Int)
+data class OtherMonoCastBox(value: Int)
+private fun checkCast(value: Any): Int =
+  val unused: MonoCastBox = value
+  42
+private fun chooseCast(flag: Bool): Int =
+  if flag then checkCast(MonoCastBox(1)) else checkCast(OtherMonoCastBox(2))
+chooseCast(true)
+//│ deforest > >>> fusing >>>
+//│ deforest > <<< fusing <<<
+//│ ——————————————| Optimized IR |——————————————————————————————————————————————————————————————————————
+//│ @private
+//│ define checkCast⁰ as fun checkCast¹(value) {
+//│   do (value as! MonoCastBox⁰);
+//│   return 42
+//│ };
+//│ @private
+//│ define chooseCast⁰ as fun chooseCast¹(flag) {
+//│   let tmp, tmp1;
+//│   match flag
+//│     true =>
+//│       set tmp = MonoCastBox¹(1);
+//│       return checkCast¹(tmp)
+//│     else
+//│       set tmp1 = OtherMonoCastBox⁰(2);
+//│       return checkCast¹(tmp1)
+//│   end
+//│ };
+//│ @data
+//│ define MonoCastBox² as class MonoCastBox⁰ {
+//│   val value²;
+//│   constructor MonoCastBox¹(value) {
+//│     define value² as val value³ = value;
+//│     end
+//│   }
+//│ };
+//│ @data
+//│ define OtherMonoCastBox¹ as class OtherMonoCastBox² {
+//│   val value⁴;
+//│   constructor OtherMonoCastBox⁰(value) {
+//│     define value⁴ as val value⁵ = value;
+//│     end
+//│   }
+//│ };
+//│ return chooseCast¹(true)
+//│ —————————————————| Output |—————————————————————————————————————————————————————————————————————————
+//│ = 42
+
+
+#config(inlining: None, flowBasedOpt: Some(FlowBasedOpt(logEffects: true, mono: true)))
+//│ flow-analysis > >>> effect-analysis results >>>
+//│ flow-analysis > <<< effect-analysis results <<<
+
+
+// Combining callback uses in mono mode must preserve the effectful call and
+// propagate its effect through the one shared function body.
+:checkIR
+:expect [20, 21, 1]
+let calls = 0
+private fun applyCallback(callback, value: Int) = callback(value)
+private fun pureCallback(value: Int): Int = value
+private fun effectfulCallback(value: Int): Int =
+  set calls += 1
+  value + 1
+let first = applyCallback(pureCallback, 20)
+let second = applyCallback(effectfulCallback, 20)
+[first, second, calls]
+//│ flow-analysis > >>> effect-analysis results >>>
+//│ flow-analysis > function applyCallback⁰#0 @ <root> -> UnsafeEta
+//│ flow-analysis > function effectfulCallback⁰#0 @ <root> -> UnsafeEta
+//│ flow-analysis > function pureCallback⁰#0 @ <root> -> Pure
+//│ flow-analysis > call +⁰@result²#0 @ <root> -> Pure
+//│ flow-analysis > call +⁰@result¹#0 @ <root> -> Pure
+//│ flow-analysis > call applyCallback⁰@result³#0 @ <root> -> UnsafeEta
+//│ flow-analysis > call applyCallback⁰@result⁴#0 @ <root> -> UnsafeEta
+//│ flow-analysis > call callback⁰@result⁰#0 @ <root> -> UnsafeEta
+//│ flow-analysis > <<< effect-analysis results <<<
+//│ = [20, 21, 1]
+//│ calls = 1
+//│ first = 20
+//│ second = 21

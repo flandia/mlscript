@@ -771,6 +771,7 @@ class FlowConstraintsCollector(
           localVariables.getOrElseUpdate(v, {
             val local = new StratVar(v.name, v.sourceSymbol, v.generatedForFun, v.instantiationId)
             fState.stratVars += local
+            variableOrigins(local) = variableOrigins.getOrElse(v, v)
             if symbolFlowVars(v) then symbolFlowVars += local
             local
           })
@@ -822,13 +823,54 @@ class FlowConstraintsCollector(
   // Effect variables also name their source function, but their bounds describe effects,
   // not that function's value. Only copies of runtime slots can determine erased types.
   private val symbolFlowVars = MutSet.from(preAnalyzer.res.generatedVars.values)
+  private val originalVarSet = preAnalyzer.res.generatedVars.values.toSet
+  def isConcreteVariable(v: StratVar): Bool =
+    v.generatedForFun.isEmpty || mono && originalVarSet(v)
   for (sym, v) <- preAnalyzer.res.generatedVars if mono || v.generatedForFun.isEmpty do
     symbolFlows += ((sym, Nil, v))
+
+  // A copied variable keeps its original identity even through several schemes.
+  // Names and source symbols cannot identify anonymous results, effects, or captures.
+  private val variableOrigins = MutMap.empty[StratVar, StratVar]
+  private enum GeneratedVarKind:
+    case Result, Effect, Captures
+  private val generatedOrigins = MutMap.empty[(OriginId, GeneratedVarKind), StratVar]
+  private def freshGeneratedVar(
+    name: Str,
+    site: OriginId,
+    kind: GeneratedVarKind,
+    sourceSymbol: Opt[Symbol],
+  )(using cc: ConstraintsCollector): StratVar =
+    val v = freshVar(name, sourceSymbol, cc.forFun, cc.instId)
+    // Lowering can reuse an IR expression in several places. Keep local inference
+    // fresh, but give repeated visits the same identity for global mono reuse.
+    variableOrigins(v) = generatedOrigins.getOrElseUpdate(site -> kind, v)
+    v
+  private class StrategyCopies:
+    val variables = MutMap.empty[StratVar, StratVar]
+    val prodFuns = MutMap.empty[ProdFun, ProdFun]
+    val ctors = MutMap.empty[Ctor, Ctor]
+    val consFuns = MutMap.empty[ConsFun, ConsFun]
+    val casts = MutMap.empty[CastConsumer, CastConsumer]
+    val fields = MutMap.empty[FieldSel, FieldSel]
+    val dtors = MutMap.empty[Dtor, Dtor]
+  // Reuse applies only to the global mono graph. Every SCC still infers its
+  // scheme in isolation, including fresh instances of already solved callees.
+  private val monoCopies = new StrategyCopies
+  private val monoVariables = MutMap.from(originalVarSet.iterator.map(v => v -> v))
+  private val monoProdFuns = MutMap.empty[FunId, ProdFun]
+  private val monoCtors = MutMap.empty[ResultId, Ctor]
+  private val monoConsFuns = MutMap.empty[CallId, ConsFun]
+  private val monoCasts = MutMap.empty[ResultId, CastConsumer]
+  private val monoFields = MutMap.empty[ResultId, FieldSel]
+  private val monoDtors = MutMap.empty[ResultId, Dtor]
+  private val monoEnvironments = MutSet.empty[StratVar]
+  private val monoBounds = MutSet.empty[ProdStrat -> ConsStrat]
   
   locally {
     val funsToProdStratScheme = MutMap.empty[TermSymbol, ProdStratScheme]
 
-    if !mono then
+    def analyzeSchemes(): Unit =
       // Computing the ProdStratScheme for each scc group, this way the sccs of the call graph is
       // never materialized
       object ProdStratSchemeAnalysisInScc extends SccAnalysis[TermSymbol]:
@@ -867,7 +909,9 @@ class FlowConstraintsCollector(
       end ProdStratSchemeAnalysisInScc
       
       ProdStratSchemeAnalysisInScc.queryAll(preAnalyzer.res.rootFunDefns.keys)
-    end if
+    end analyzeSchemes
+
+    analyzeSchemes()
 
     // collect constraints from the top-level block
     globalCollector.givenIn: cc ?=>
@@ -876,16 +920,13 @@ class FlowConstraintsCollector(
       cc.constrain(UnsafeEta, unknownEffect)
       processBlock(preAnalyzer.pgrm.main)(using cc, UnknownCons, N)
 
-      // this places non-affine constraints correctly:
-      // - in mono mode there are no per-scc collectors,
-      // so the global collector gets all the relevant non-affine constraints;
-      // - in poly mode, non-affine constraints on scc-owned symbols are handled
-      // in their scc strat scheme, and the global collector collects the remaining constriants
+      // Function-owned non-affine constraints have already been solved in their
+      // SCC schemes. Only the remaining global slots are constrained here.
       if nonAffineTracking then
         for
           sym <- preAnalyzer.res.nonAffineSyms
           stratVar <- preAnalyzer.res.generatedVars.get(sym)
-          if mono || stratVar.generatedForFun.isEmpty
+          if stratVar.generatedForFun.isEmpty
         do cc.constrain(stratVar, NonAffine)
 
       for
@@ -894,19 +935,16 @@ class FlowConstraintsCollector(
       do
         cc.constrain(generatedVars(tsym), UnknownCons)
 
-      if mono then
-        for
-          (_, fun) <- preAnalyzer.res.rootFunDefns
-          if fun.visibility is Visibility.Public
-        do
-          cc.constrain(generatedVars(fun.dSym), UnknownCons)
-      else
-        for (funSym, fun) <- preAnalyzer.res.rootFunDefns do
-          val pScheme = funsToProdStratScheme(funSym)
-          val synthesizedRefUid =
-            preAnalyzer.res.funSymToFunDefn(funSym).sym.asMemberRef(funSym).uid
-          val selfProd = pScheme.instantiate(synthesizedRefUid, funSym)
+      for (funSym, fun) <- preAnalyzer.res.rootFunDefns do
+        val pScheme = funsToProdStratScheme(funSym)
+        val synthesizedRefUid =
+          preAnalyzer.res.funSymToFunDefn(funSym).sym.asMemberRef(funSym).uid
+        val selfProd = pScheme.instantiate(synthesizedRefUid, funSym)
+        // Poly keeps a generic original in addition to specialized copies. Mono
+        // has one body, so private functions retain their known caller flows.
+        if !mono || (fun.visibility is Visibility.Public) then
           cc.constrain(selfProd, UnknownCons)
+        if !mono then
           val selfInstId = synthesizedRefUid :: Nil
           synthesizedInstIdToFunSym(selfInstId) = funSym
     
@@ -917,20 +955,26 @@ class FlowConstraintsCollector(
       referringTo: TermSymbol
     )(using cc: ConstraintsCollector): StratVar =
       val groupRep: TermSymbol = funToSccRep(referringTo).get
-      val stratVarMap = MutMap.empty[StratVar, StratVar]
+      val reuseMono = mono && cc.forFunGroup.isEmpty
+      val copies = if reuseMono then monoCopies else new StrategyCopies
+      val stratVarMap = copies.variables
       for (external, local) <- pScheme.environment do
         stratVarMap(local) = cc.variable(external)
-      val prodFunMap = MutMap.empty[ProdFun, ProdFun]
-      val ctorMap = MutMap.empty[Ctor, Ctor]
-      val consFunMap = MutMap.empty[ConsFun, ConsFun]
-      val castMap = MutMap.empty[CastConsumer, CastConsumer]
-      val fieldMap = MutMap.empty[FieldSel, FieldSel]
-      val dtorMap = MutMap.empty[Dtor, Dtor]
+      val prodFunMap = copies.prodFuns
+      val ctorMap = copies.ctors
+      val consFunMap = copies.consFuns
+      val castMap = copies.casts
+      val fieldMap = copies.fields
+      val dtorMap = copies.dtors
       // Bounds and metadata can lead back to a strategy whose immutable shape is
       // still being copied. Populate them only after its shell has been memoized.
       val pending = mutable.Queue.empty[() => Unit]
       def updateInstantiationId(instId: Opt[InstantiationId]) =
-        S(instId.fold(referSite :: Nil)(referSite :: _))
+        if reuseMono then S(Nil) else S(instId.fold(referSite :: Nil)(referSite :: _))
+      def canonical[K, A](key: K, targets: MutMap[K, A])(fresh: => A): A =
+        if reuseMono then targets.getOrElseUpdate(key, fresh) else fresh
+      def importBound(p: ProdStrat, c: ConsStrat): Unit =
+        if !reuseMono || monoBounds.add(p -> c) then cc.constrain(p, c)
       def duplicateVarStateOpt(s: StratVar | NoProd): StratVar | NoProd =
         s match
         case v: StratVar => duplicateVarState(v)
@@ -939,25 +983,46 @@ class FlowConstraintsCollector(
         assert(s.generatedForFun.flatMap(funToSccRep).contains(groupRep))
         stratVarMap.getOrElseUpdate(s, {
           val instId = updateInstantiationId(s.instantiationId)
-          val v = freshVar(s.name, s.sourceSymbol, cc.forFun, instId)
-          if symbolFlowVars(s) then
-            symbolFlowVars += v
-            for sym <- s.sourceSymbol if cc.forFunGroup.isEmpty do
-              symbolFlows += ((sym, instId.get, v))
+          val origin = variableOrigins.getOrElse(s, s)
+          val v = canonical(origin, monoVariables) {
+            val v = freshVar(s.name, s.sourceSymbol, cc.forFun, instId)
+            if symbolFlowVars(s) then
+              symbolFlowVars += v
+              for sym <- s.sourceSymbol if cc.forFunGroup.isEmpty do
+                symbolFlows += ((sym, instId.get, v))
+            v
+          }
+          variableOrigins(v) = origin
           pending.enqueue(() => {
-            v.lowerBounds ++= s.lowerBounds.iterator.map(duplicateProdStrat)
-            v.upperBounds ++= s.upperBounds.iterator.map(duplicateConsStrat)
+            if reuseMono then
+              // Shared targets may already have bounds from other instances.
+              // Let the solver propagate every newly joined lower/upper pair.
+              s.lowerBounds.foreach(p => importBound(duplicateProdStrat(p), v))
+              s.upperBounds.foreach(c => importBound(v, duplicateConsStrat(c)))
+            else
+              v.lowerBounds ++= s.lowerBounds.iterator.map(duplicateProdStrat)
+              v.upperBounds ++= s.upperBounds.iterator.map(duplicateConsStrat)
           })
           v
         })
       def duplicateProdFun(p: ProdFun): ProdFun = prodFunMap.getOrElseUpdate(p, {
-        val copy = new ProdFun(p.exprId, updateInstantiationId(p.instantiationId))(
-          p.params.map(duplicateConsStrat),
-          p.requiredParamCount,
-          p.restParam.map(duplicateConsStrat),
-          duplicateProdStrat(p.res),
-          duplicateVarState(p.capturedVarUpperbound),
-          duplicateVarStateOpt(p.effect))
+        val params = p.params.map(duplicateConsStrat)
+        val restParam = p.restParam.map(duplicateConsStrat)
+        val res = duplicateProdStrat(p.res)
+        val captures = duplicateVarState(p.capturedVarUpperbound)
+        val effect = duplicateVarStateOpt(p.effect)
+        val copy = canonical(p.exprId, monoProdFuns) {
+          new ProdFun(p.exprId, updateInstantiationId(p.instantiationId))(
+            params, p.requiredParamCount, restParam, res, captures, effect)
+        }
+        // Copies of one physical site must agree on immutable operands. Later
+        // instances contribute bounds and metadata, never a different shape.
+        assert(copy.params === params)
+        assert(copy.requiredParamCount === p.requiredParamCount)
+        assert(copy.restParam === restParam)
+        assert(copy.res is res)
+        assert(copy.capturedVarUpperbound is captures)
+        assert(copy.effect is effect)
         cc.solvedStrategies += copy
         pending.enqueue(() => copy.dests ++= p.dests.iterator.map {
           case c: ConsFun => duplicateConsFun(c)
@@ -966,8 +1031,12 @@ class FlowConstraintsCollector(
         copy
       })
       def duplicateCtor(c: Ctor): Ctor = ctorMap.getOrElseUpdate(c, {
-        val copy = registerCtor(new Ctor(c.exprId, updateInstantiationId(c.instantiationId))(
-          c.ctor, c.args.map((a, b) => a -> duplicateProdStrat(b))))
+        val args = c.args.map((a, b) => a -> duplicateProdStrat(b))
+        val copy = canonical(c.exprId, monoCtors) {
+          registerCtor(new Ctor(c.exprId, updateInstantiationId(c.instantiationId))(c.ctor, args))
+        }
+        assert(copy.ctor === c.ctor)
+        assert(copy.args === args)
         cc.solvedStrategies += copy
         pending.enqueue(() => copy.dests ++= c.dests.iterator.map {
           case d: ConcreteCtorConsumer => duplicateCtorConsumer(d)
@@ -976,8 +1045,15 @@ class FlowConstraintsCollector(
         copy
       })
       def duplicateConsFun(c: ConsFun): ConsFun = consFunMap.getOrElseUpdate(c, {
-        val copy = new ConsFun(c.exprId, updateInstantiationId(c.instantiationId))(
-          c.params.map(duplicateProdStrat), duplicateConsStrat(c.res), duplicateVarStateOpt(c.effect))
+        val params = c.params.map(duplicateProdStrat)
+        val res = duplicateConsStrat(c.res)
+        val effect = duplicateVarStateOpt(c.effect)
+        val copy = canonical(c.exprId, monoConsFuns) {
+          new ConsFun(c.exprId, updateInstantiationId(c.instantiationId))(params, res, effect)
+        }
+        assert(copy.params === params)
+        assert(copy.res is res)
+        assert(copy.effect is effect)
         cc.solvedStrategies += copy
         pending.enqueue(() => copy.srcs ++= c.srcs.iterator.map {
           case p: ProdFun => duplicateProdFun(p)
@@ -986,18 +1062,31 @@ class FlowConstraintsCollector(
         copy
       })
       def duplicateCast(c: CastConsumer): CastConsumer = castMap.getOrElseUpdate(c, {
-        val copy = new CastConsumer(c.exprId, updateInstantiationId(c.instantiationId), c.target)
+        val copy = canonical(c.exprId, monoCasts) {
+          new CastConsumer(c.exprId, updateInstantiationId(c.instantiationId), c.target)
+        }
+        assert(copy.target === c.target)
         cc.solvedStrategies += copy
         pending.enqueue(() => {
-          copy.sources ++= c.sources.iterator.map(duplicateProdStrat)
-          copy.succeeds = c.succeeds
+          if reuseMono then
+            // A failing instance makes the one physical cast observable for all
+            // its sources. The solver must perform that combined proof itself.
+            c.sources.foreach(p => importBound(duplicateProdStrat(p), copy))
+          else
+            copy.sources ++= c.sources.iterator.map(duplicateProdStrat)
+            copy.succeeds = c.succeeds
         })
         copy
       })
       def duplicateCtorConsumer(c: ConcreteCtorConsumer): FieldSel | Dtor = c match
         case c: FieldSel => fieldMap.getOrElseUpdate(c, {
-          val copy = new FieldSel(c.exprId, updateInstantiationId(c.instantiationId))(
-            c.field, c.selectsFrom, duplicateVarState(c.consVar))
+          val consVar = duplicateVarState(c.consVar)
+          val copy = canonical(c.exprId, monoFields) {
+            new FieldSel(c.exprId, updateInstantiationId(c.instantiationId))(c.field, c.selectsFrom, consVar)
+          }
+          assert(copy.field === c.field)
+          assert(copy.selectsFrom === c.selectsFrom)
+          assert(copy.consVar is consVar)
           cc.solvedStrategies += copy
           pending.enqueue(() => copy.srcs ++= c.srcs.iterator.map {
             case p: Ctor => duplicateCtor(p)
@@ -1006,7 +1095,9 @@ class FlowConstraintsCollector(
           copy
         })
         case c: Dtor => dtorMap.getOrElseUpdate(c, {
-          val copy = new Dtor(c.exprId, updateInstantiationId(c.instantiationId))
+          val copy = canonical(c.exprId, monoDtors) {
+            new Dtor(c.exprId, updateInstantiationId(c.instantiationId))
+          }
           cc.solvedStrategies += copy
           pending.enqueue(() => copy.srcs ++= c.srcs.iterator.map {
             case p: Ctor => duplicateCtor(p)
@@ -1039,10 +1130,10 @@ class FlowConstraintsCollector(
       // Substitute shared slots for the environment proxies. Only their boundary
       // bounds need solving against the surrounding program; internal bounds and
       // producer/consumer relationships are already solved in the copied graph.
-      for (_, local) <- pScheme.environment do
+      for (_, local) <- pScheme.environment if !reuseMono || monoEnvironments.add(local) do
         val shared = stratVarMap(local)
-        local.lowerBounds.foreach(p => cc.constrain(duplicateProdStrat(p), shared))
-        local.upperBounds.foreach(c => cc.constrain(shared, duplicateConsStrat(c)))
+        local.lowerBounds.foreach(p => importBound(duplicateProdStrat(p), shared))
+        local.upperBounds.foreach(c => importBound(shared, duplicateConsStrat(c)))
       while pending.nonEmpty do pending.dequeue()()
       newProd
     
@@ -1065,12 +1156,12 @@ class FlowConstraintsCollector(
             assert(whichParamList == 0)
             lambdaExprId
           case other => lastWords(s"unexpected funLamId shape: $other")
-      val res = freshVar(resName, cc.forFun)
+      val res = freshGeneratedVar(resName, funLamId, GeneratedVarKind.Result, N)
       val sourceSymbol = funLamId match
         case (sym: TermSymbol, _) => S(sym)
         case _: ResultId => N
       val effect =
-        freshVar(s"effect_$funLamId", sourceSymbol, cc.forFun, cc.instId)
+        freshGeneratedVar(s"effect_$funLamId", funLamId, GeneratedVarKind.Effect, sourceSymbol)
       params.foreach: ps =>
         ps.restParam.foreach: p =>
           generatedVars(p.sym).constrainOpaque
@@ -1085,8 +1176,8 @@ class FlowConstraintsCollector(
           // Applying earlier parameter lists only captures arguments; each needs its own, initially pure summary.
           val effectParamList =
             if whichParamList == params.size - 1 then effect
-            else freshVar(s"effect_$plFunId", cc.forFun)
-          val capUB = freshVar(s"cap_ub_$plFunId", cc.forFun)
+            else freshGeneratedVar(s"effect_$plFunId", plFunId, GeneratedVarKind.Effect, N)
+          val capUB = freshGeneratedVar(s"cap_ub_$plFunId", plFunId, GeneratedVarKind.Captures, N)
           for
             v <- preAnalyzer.res.capturedVars(plFunId)
             capturedSymStrat <- preAnalyzer.res.generatedVars.get(v)
@@ -1108,8 +1199,7 @@ class FlowConstraintsCollector(
 
     def processFunctionDefn(fun: FunDefn)(using cc: ConstraintsCollector): Unit =
       val isRoot = preAnalyzer.res.rootFunDefns.contains(fun.dSym)
-      if mono || !isRoot then
-        given ConstraintsCollector = if isRoot then cc.forActualRootFun(fun.dSym) else cc
+      if !isRoot then
         processFunctionBody(fun)
 
     def processFunctionBody(fun: FunDefn)(using cc: ConstraintsCollector): Unit =
@@ -1220,8 +1310,8 @@ class FlowConstraintsCollector(
     
     def processResult(r: Result)(using cc: ConstraintsCollector, currentEffect: Opt[StratVar]): ProdStrat =
       val instId = cc.instId
-      def freshCallEffect(): StratVar =
-        val effect = freshVar("call_effect", cc.forFun)
+      def freshCallEffect(callId: CallId): StratVar =
+        val effect = freshGeneratedVar("call_effect", callId, GeneratedVarKind.Effect, N)
         // A call's effect contributes to the enclosing function's latent effect.
         currentEffect.foreach: enclosingEffect =>
           cc.constrain(effect, enclosingEffect)
@@ -1243,8 +1333,8 @@ class FlowConstraintsCollector(
           argsStrat.foreach(arg => cc.constrain(arg, UnknownCons))
           UnknownProd
         else
-          val callRes = freshVar("call_res", cc.forFun)
-          val effect = freshCallEffect()
+          val callRes = freshGeneratedVar("call_res", callId, GeneratedVarKind.Result, N)
+          val effect = freshCallEffect(callId)
           cc.constrain(fStrat, new ConsFun(callId, instId)(
             argsStrat,
             callRes,
@@ -1255,7 +1345,7 @@ class FlowConstraintsCollector(
         case sel@TrackableSelect(from, field, owner) =>
           markUnsafeEta()
           val fromStrat = processResult(from)
-          val selRes = freshVar("sel_res", cc.forFun)
+          val selRes = freshGeneratedVar("sel_res", sel.uid, GeneratedVarKind.Result, N)
           cc.constrain(
             fromStrat,
             new FieldSel(sel.uid, instId)(field, owner, selRes))
@@ -1484,7 +1574,7 @@ class FlowConstraintSolver(val collector: FlowConstraintsCollector):
       val outputRes =
         for
           stratVar <- fState.stratVars
-          if collector.mono || stratVar.generatedForFun.isEmpty
+          if collector.isConcreteVariable(stratVar)
           if AllUpperBounds(stratVar).contains(NonAffine)
         yield summon[SymbolPrinter].printSymbol(stratVar)
       for nonAffine <- outputRes.toSortedSet do
@@ -1504,7 +1594,7 @@ class FlowConstraintSolver(val collector: FlowConstraintsCollector):
       val outputRes =
         for
           stratVar <- fState.stratVars
-          if collector.mono || stratVar.generatedForFun.isEmpty
+          if collector.isConcreteVariable(stratVar)
           if AllUpperBounds(stratVar).contains(Accumulator)
           accumulatorSym <- showAccumulatorSym(stratVar)
         yield accumulatorSym

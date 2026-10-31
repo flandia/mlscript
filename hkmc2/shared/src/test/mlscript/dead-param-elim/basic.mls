@@ -315,8 +315,8 @@ private fun f(a) = g(a)
 private fun g(x) = 3
 f(1)
 //│ dead-param-elim > >>> dead-param-elim results >>>
-//│ dead-param-elim > f²⁵#0 @ <root> -> eliminable: {0}
 //│ dead-param-elim > g²#0 @ <root> -> eliminable: {0}
+//│ dead-param-elim > f²⁵#0 @ <root> -> eliminable: {0}
 //│ dead-param-elim > <<< dead-param-elim results <<<
 //│ = 3
 

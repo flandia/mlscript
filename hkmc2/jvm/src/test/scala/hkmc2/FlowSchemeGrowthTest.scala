@@ -19,7 +19,7 @@ class FlowSchemeGrowthTest extends AnyFunSuite:
   private given DebugPrinter = new DebugPrinter()
   private given TraceLogger = TraceLogger.silent
 
-  private def queuedConstraints(aliases: Int, calls: Int): Int =
+  private def queuedConstraints(aliases: Int, calls: Int, mono: Bool): Int =
     val dir = os.temp.dir(prefix = "flow-scheme-growth-")
     try
       val file = dir / "Growth.mls"
@@ -50,14 +50,25 @@ class FlowSchemeGrowthTest extends AnyFunSuite:
       given fState: FlowAnalysis.State = new FlowAnalysis.State
       val pre = new FlowPreAnalyzer(program)
       val collector = new FlowConstraintsCollector(pre,
-        mono = false, nonAffineTracking = false, accumulatorTracking = false)
+        mono = mono, nonAffineTracking = false, accumulatorTracking = false)
       collector.allConstraints.size
     finally os.remove.all(dir)
 
   test("scheme-local constraints are not queued again for every use"):
     for calls <- List(1, 8) do
-      val small = queuedConstraints(1, calls)
-      val large = queuedConstraints(64, calls)
+      val small = queuedConstraints(1, calls, mono = false)
+      val large = queuedConstraints(64, calls, mono = false)
       withClue(s"$calls calls: $small constraints with 1 alias, $large with 64 aliases: "):
         assert(large == small,
           "The whole-program solve should connect solved schemes, without replaying their local constraints")
+
+  test("mono references do not repeatedly import the same local bounds"):
+    val smallSingle = queuedConstraints(1, 1, mono = true)
+    val smallRepeated = queuedConstraints(1, 8, mono = true)
+    val largeSingle = queuedConstraints(64, 1, mono = true)
+    val largeRepeated = queuedConstraints(64, 8, mono = true)
+    val smallIncrease = smallRepeated - smallSingle
+    val largeIncrease = largeRepeated - largeSingle
+    withClue(s"1 to 8 calls add $smallIncrease constraints with 1 alias, $largeIncrease with 64 aliases: "):
+      assert(largeIncrease == smallIncrease,
+        "Additional mono references should add caller connections without importing the same local bounds again")
